@@ -55,7 +55,6 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
     diffs = []
     for parent in commit.parents:
         diff = parent.diff(commit, paths=path, create_patch=True)
-        should_add_diff = False
         diff_string = ""
         for diff_item in diff:
             diff_item_string = diff_item.diff.decode("utf-8", errors="ignore")
@@ -69,7 +68,6 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                 if line.startswith("-"):
                     for search_string in search_strings:
                         if search_string in (line + prev_line + prev_prev_line):
-                            should_add_diff = True
                             matches_rem += 1
                             prev_line = ""
                             prev_prev_line = ""
@@ -78,7 +76,6 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                 elif line.startswith("+"):
                     for search_string in search_strings:
                         if search_string in (line + prev_line + prev_prev_line):
-                            should_add_diff = True
                             matches_add += 1
                             prev_line = ""
                             prev_prev_line = ""
@@ -90,7 +87,7 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
 
             diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
 
-        if should_add_diff:
+        if matches_rem + matches_add > 0:
             diffs.append(diff_string)
 
     return diffs, matches_rem, matches_add
@@ -208,7 +205,7 @@ def scan_addon_commits(
         )[:16]
 
         if item["is_noise"]:
-            prefix = "__x"
+            prefix = "__noise"
         else:
             prefix = "c"
 
@@ -233,7 +230,7 @@ def scan_addon_commits(
 
 def list_addons(repo_path: str, excludes: List[str], min_lines=500):
     directory = Path(f"{repo_path}/addons")
-    subdirectories = ["base"]
+    subdirectories = ["base"]  # NOTE for some reason scanning base can be VERY slow
     for d in directory.iterdir():
         if not d.is_dir():
             continue
