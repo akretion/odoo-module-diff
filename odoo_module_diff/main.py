@@ -44,38 +44,6 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     return last_commit, False
 
 
-def TODOfind_end_commit_serie(repo: git.Repo, target_serie: int):
-    """
-    Find the last commit before the serie is considered stable.
-    As Odoo don't use tag and could repeat variations of the release message,
-    I opted to hardcode the release commit for each serie.
-    """
-    if target_serie == 18:
-        for commit in repo.iter_commits():
-            return commit, False
-    if target_serie == 17:
-        return repo.commit("dd05f0af20a84658c6a57b10bc80832bd341a638"), True
-    elif target_serie == 16:
-        return repo.commit("fa58938b3e2477f0db22cc31d4f5e6b5024f478b"), True
-    elif target_serie == 15:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-
-    elif target_serie == 14:
-        return repo.commit("875408f59b050e0547feb246a0dc5a7ff536afa9"), True
-    elif target_serie == 13:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-    elif target_serie == 12:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-    elif target_serie == 11:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-    elif target_serie == 10:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-    elif target_serie == 9:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-    elif target_serie == 8:
-        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
-
-
 def commit_contains_string(path: str, commit: git.Commit, search_strings: List[str]):
     """
     Check if the commit diff contains the specified strings.
@@ -292,8 +260,6 @@ def list_addons(repo_path: str, excludes: List[str], min_lines=500):
                             total_lines += sum(1 for _ in f)
             if total_lines < min_lines:
                 continue
-            # if total_lines > 1000:
-            #    continue  # done already
 
         subdirectories.append(d.name)
     return subdirectories
