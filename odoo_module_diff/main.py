@@ -13,18 +13,67 @@ LINE_CHANGE_THRESHOLD = 30
 DB_STRUCTURE_STRINGS = ["= fields.", "_inherit = ", "_inherits = "]
 
 
-def find_commit_by_message(repo: git.Repo, message: str):
+def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     """
     Find the first commit with a specific message.
     Return the more recent commit if no match is found.
     """
+    if target_serie == 16:
+        message = "[REL] 16.0 FINAL"
+    if target_serie == 10:  # Odoo I hate you so much
+        # message = "[REL] 10.0 \o/"
+        return repo.commit("780869879b00d5772985e7c11003ac8a94451a61"), True
+    elif target_serie == 9:
+        message = "[REL] Odoo 9"
+    elif target_serie == 8:
+        message = "[REL] Odoo 8.0"
+    else:
+        message = f"[REL] {target_serie}.0"
+
     last_commit = None
     for commit in repo.iter_commits():
         if last_commit is None:
             last_commit = commit
-        if message in str(commit.message):
+        if (
+            message in str(commit.message.splitlines()[0])
+            and commit.message.splitlines()[0].replace(message, "").strip() == ""
+        ):
             return commit, True
+    print("WARNING LAST COMMIT BEFORE RELEASE NOT FOUND!")
+    print("Using last commit instead...")
     return last_commit, False
+
+
+def TODOfind_end_commit_serie(repo: git.Repo, target_serie: int):
+    """
+    Find the last commit before the serie is considered stable.
+    As Odoo don't use tag and could repeat variations of the release message,
+    I opted to hardcode the release commit for each serie.
+    """
+    if target_serie == 18:
+        for commit in repo.iter_commits():
+            return commit, False
+    if target_serie == 17:
+        return repo.commit("dd05f0af20a84658c6a57b10bc80832bd341a638"), True
+    elif target_serie == 16:
+        return repo.commit("fa58938b3e2477f0db22cc31d4f5e6b5024f478b"), True
+    elif target_serie == 15:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+
+    elif target_serie == 14:
+        return repo.commit("875408f59b050e0547feb246a0dc5a7ff536afa9"), True
+    elif target_serie == 13:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+    elif target_serie == 12:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+    elif target_serie == 11:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+    elif target_serie == 10:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+    elif target_serie == 9:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
+    elif target_serie == 8:
+        return repo.commit("b50796d5160745d9f85992467d632d9ce2476697"), True
 
 
 def commit_contains_string(path: str, commit: git.Commit, search_strings: List[str]):
@@ -250,29 +299,6 @@ def list_addons(repo_path: str, excludes: List[str], min_lines=500):
     return subdirectories
 
 
-def release_message(serie: int):
-    """
-    Helper to find the release start amd stop commit
-    """
-    if serie >= 15:
-        release_message = f"bump master release to {serie}"
-    elif serie >= 13:
-        release_message = f"bump master release version to {serie}"
-    elif serie == 12:
-        release_message = "master is back as 12"
-    elif serie == 11:
-        release_message = "[REL] 11.0"
-    elif serie == 10:
-        release_message = "[REL] master is version 10"
-    elif serie == 9:
-        release_message = "[REL] Odoo 9"
-    elif serie == 8:
-        release_message = "[REL] 8.0 RC1"
-    else:
-        raise RuntimeError("Odoo Module Diff only works from serie 8.0!")
-    return release_message
-
-
 def scan(
     repo_path: str,
     target_serie: int,
@@ -303,9 +329,6 @@ def scan(
             min_lines=500,
         )
 
-    #    start_commit, _start_found = find_commit_by_message(
-    #        repo, release_message(target_serie - 1)
-    #    )
     start_date = datetime.fromtimestamp(start_commit.committed_date).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -314,7 +337,7 @@ def scan(
     )
 
     # Find the end commit
-    end_commit, end_found = find_commit_by_message(repo, release_message(target_serie))
+    end_commit, end_found = find_end_commit_by_serie(repo, target_serie)
     end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -371,6 +394,41 @@ def scan(
         scan_addon_commits(
             repo, addon, start_commit, end_commit, output_module_dir, keep_noise
         )
+
+
+def create_serie_readme(target_serie: int, output_dir: str):
+    result = subprocess.run(
+        ["find", ".", "-type", "f", "-name", "*.patch"],
+        capture_output=True,
+        cwd=output_dir,
+        text=True,
+    )
+    commits = len(result.stdout.splitlines())
+
+    commits_size = subprocess.run(
+        ["du", "-sh", "."],
+        capture_output=True,
+        cwd=output_dir,
+        text=True,
+    ).stdout
+
+    command = 'du -sh -- */ | sort -rh | head -n 30 | awk \'{sub(/\\/$/, "", $2); print NR ". " $2 " - " $1}\''
+    result = subprocess.run(
+        command, shell=True, capture_output=True, cwd=output_dir, text=True
+    )
+    table = result.stdout
+
+    readme = f"""# How crazy it is to migrate to Odoo {target_serie}.0?
+
+There are {commits} non trivial commits impacting the database structure to migrate
+from Odoo {target_serie -1}.0 to {target_serie}.0
+Together theses commits weight {commits_size}.
+
+The addons that changed the most are listed below with their relative migration commit sizes:
+    """
+
+    with open(f"{output_module_dir}/README.md", "w") as f:
+        f.write(readme)
 
 
 app = typer.Typer()
