@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=61.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["odoo_module_diff*"]
+
+[project]
+name = "odoo-module-diff"
+description = "A CLI tool to extract database structure impacting commits between Odoo series"
+authors = [
+  {name = "Raphaël Valyi", email = "raphael.valyi@akretion.com"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Odoo",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+readme = "README.md"
+dependencies = [
+    "GitPython",
+    "typer[all] >= 0.3.2",
+    "python-slugify",
+    "manifestoo",
+]
+requires-python = ">=3.8"
+dynamic = ["version"]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "coverage[toml]",
+]
+
+[tool.setuptools]
+license-files = ["LICENSE"]
+
+[tool.setuptools.dynamic]
+version = {attr = "odoo_module_diff.__version__"}
+
+[project.urls]
+Homepage = "https://github.com/akretion/odoo-module-diff"
+Source = "https://github.com/akretion/odoo-module-diff"
+
+[project.scripts]
+odoo-module-diff = "odoo_module_diff.main:app"
+
+[tool.ruff]
+target-version = "py38"
+fix = true
+
+[tool.ruff.lint]
+select = [
+    "B",
+    "E",
+    "F",
+    "I",
+    "UP",
+    "W",
+]
+ignore = [
+]
+exclude = [
+    "docs/conf.py",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["odoo_module_diff"]
+
+[tool.ruff.lint.per-file-ignores]
+"odoo_module_diff/main.py" = ["B008"]
+
+
+[tool.coverage.run]
+branch = true
+source_pkgs = ["odoo_module_diff"]
+
+[tool.coverage.paths]
+source = ["odoo_module_diff", ".tox/*/site-packages"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+]
