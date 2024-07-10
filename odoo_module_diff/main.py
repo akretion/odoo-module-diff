@@ -18,7 +18,7 @@ NON_TRIVIAL_FIELD_ATTRS = (
     "store=",
     "compute=",
     "recursive=",
-    "inverse=",
+    # "inverse=",
 )
 
 
@@ -86,8 +86,23 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                             if "_inherit" in line and "AbstractModel" in (
                                 prev_line + prev_prev_line
                             ):
-                                prev_line = line
-                                prev_prev_line = prev_line
+                                break
+
+                            if "_inherit" in (prev_line + prev_prev_line) and (
+                                "[" not in (prev_line + prev_prev_line)
+                                or "]" not in prev_line + prev_prev_line
+                            ):
+                                break
+
+                            if (
+                                # check if change is only a trivial attr change
+                                search_string == "= fields."
+                                and line.count("=") == 1
+                                and search_string not in line
+                                and not any(
+                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
+                                )
+                            ):
                                 break
 
                             line_match = True
@@ -107,8 +122,23 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                             if "_inherit" in line and "AbstractModel" in (
                                 prev_line + prev_prev_line
                             ):
-                                prev_line = line
-                                prev_prev_line = prev_line
+                                break
+
+                            if "_inherit" in (prev_line + prev_prev_line) and (
+                                "[" not in (prev_line + prev_prev_line)
+                                or "]" not in prev_line + prev_prev_line
+                            ):
+                                break
+
+                            if (
+                                # check if change is only a trivial attr change
+                                search_string == "= fields."
+                                and line.count("=") == 1
+                                and search_string not in line
+                                and not any(
+                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
+                                )
+                            ):
                                 break
 
                             if (
@@ -164,8 +194,8 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                 if line_match:
                     prev_line = prev_prev_line = ""  # reset scanning buffer
                 else:
-                    prev_line = line
                     prev_prev_line = prev_line
+                    prev_line = line
                 prev_line_noreset = line
 
             diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
