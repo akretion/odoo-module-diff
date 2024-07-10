@@ -106,7 +106,10 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                                 break
 
                             line_match = True
-                            matches_rem += 1
+                            if search_string not in line:
+                                matches_rem += 0.9
+                            else:
+                                matches_rem += 1
                             if "2many(" in line:  # relations removal weights more
                                 matches_rem += 1
                             break
@@ -186,7 +189,10 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                                     break
 
                             line_match = True
-                            matches_add += 1
+                            if search_string not in line:
+                                matches_add += 0.9
+                            else:
+                                matches_add += 1
                             if "2many" in line:  # adding relations weights more
                                 matches_add += 1
                             break
@@ -215,7 +221,7 @@ def scan_addon_commits(
     keep_noise: bool = False,
 ):
     if addon == "base":
-        module_path = "odoo/addons/base/"
+        module_path = "odoo/addons/base/models/"
     else:
         module_path = f"addons/{addon}/models/"
 
@@ -237,6 +243,9 @@ def scan_addon_commits(
             # since previous serie.
             # such false positives were common before version 13.
             continue
+
+        if addon == "base":  # logging progress because base can be very slow...
+            print(f"  scanning {commit.hexsha} {summary} ...")
 
         total_changes = 0
         for file in commit.stats.files:
@@ -378,9 +387,7 @@ def scan_addon_commits(
 
 def list_addons(repo_path: str, excludes: List[str], min_lines=500):
     directory = Path(f"{repo_path}/addons")
-    subdirectories = (
-        []
-    )  # ["base"]  # NOTE for some reason scanning base can be VERY slow
+    subdirectories = ["base"]
     for d in directory.iterdir():
         if not d.is_dir():
             continue
