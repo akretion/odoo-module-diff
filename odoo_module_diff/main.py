@@ -10,6 +10,8 @@ import typer
 
 
 LINE_CHANGE_THRESHOLD = 30
+LINE_CHANGE_FEAT_THRESHOLD = 200
+LINE_MESSAGE_FEAT_THRESHOLD = 45
 DB_STRUCTURE_STRINGS = ("= fields.", "_inherit = ", "_inherits = ")
 NON_TRIVIAL_FIELD_ATTRS = (
     "company_dependent=",
@@ -59,49 +61,66 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
     """
     matches_rem = 0
     matches_add = 0
+    matches_feat = 0
     diffs = []
     for parent in commit.parents:
         diff = parent.diff(commit, paths=path, create_patch=True)
         diff_string = ""
         for diff_item in diff:
             diff_item_string = diff_item.diff.decode("utf-8", errors="ignore")
-            # breakpoint()
-            # print(diff_item_string)
 
             prev_line = ""
             prev_prev_line = ""
-
             prev_line_noreset = ""
 
             for line in diff_item_string.splitlines():
+                line_match = False
                 if line.startswith("-"):
                     for search_string in search_strings:
-                        if search_string in (line + prev_line + prev_prev_line):
+                        if (
+                            search_string in line
+                            or search_string in (prev_line + prev_prev_line)
+                            and ")" not in (prev_line + prev_prev_line)
+                        ):
+
+                            if "_inherit" in line and "AbstractModel" in (
+                                prev_line + prev_prev_line
+                            ):
+                                prev_line = line
+                                prev_prev_line = prev_line
+                                break
+
+                            line_match = True
                             matches_rem += 1
-                            prev_line = ""
-                            prev_prev_line = ""
+                            if "2many(" in line:  # relations removal weights more
+                                matches_rem += 1
                             break
 
                 elif line.startswith("+"):
                     for search_string in search_strings:
-                        if search_string in (line + prev_line + prev_prev_line):
+                        if (
+                            search_string in line
+                            or search_string in (prev_line + prev_prev_line)
+                            and ")" not in (prev_line + prev_prev_line)
+                        ):
+
+                            if "_inherit" in line and "AbstractModel" in (
+                                prev_line + prev_prev_line
+                            ):
+                                prev_line = line
+                                prev_prev_line = prev_line
+                                break
+
                             if (
                                 "= fields." in line and ")" in line
                             ):  # 1 line field addition assumed
-                                if not any(
-                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
-                                ):
-                                    # not counting addition of trivial fields
-                                    prev_line = line
-                                    prev_prev_line = prev_line
-                                    break
-
-                                elif (
+                                if (
                                     prev_line_noreset.startswith("-")
                                     and "= fields." in prev_line_noreset
                                     and prev_line_noreset[1:].split("=")[0]
                                     == line[1:].split("=")[0]  # same field name
                                 ):
+                                    # new we try to detect trivial field attrs changes:
                                     non_trivial_prev = set()
                                     for key in NON_TRIVIAL_FIELD_ATTRS:
                                         if key in prev_line_noreset:
@@ -117,33 +136,44 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                                             non_trivial_line.add(f"{key}{value}")
 
                                     if non_trivial_prev == non_trivial_line:
-                                        print(
-                                            "NOT COUNTING TRIVIAL FIELD CHANGE:",
-                                            prev_line_noreset,
-                                            line,
-                                        )
-                                        matches_rem -= 1
-                                        prev_line = ""
-                                        prev_prev_line = ""
+                                        # print(
+                                        #    "  not counting trivial field change:",
+                                        #    prev_line_noreset,
+                                        #    line,
+                                        # )
+                                        matches_rem -= 1  # cancel our previous match
+                                        line_match = False
                                         break
 
+                                elif not "2many(" in line and not any(
+                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
+                                ):
+                                    # not counting addition of trivial fields because no migration work
+                                    # prev_line = line
+                                    # prev_prev_line = prev_line
+                                    line_match = True
+                                    matches_feat += 1
+                                    break
+
+                            line_match = True
                             matches_add += 1
-                            prev_line = ""
-                            prev_prev_line = ""
+                            if "2many" in line:  # adding relations weights more
+                                matches_add += 1
                             break
 
+                if line_match:
+                    prev_line = prev_prev_line = ""  # reset scanning buffer
                 else:
                     prev_line = line
                     prev_prev_line = prev_line
-
                 prev_line_noreset = line
 
             diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
 
-        if matches_rem + matches_add > 0:
+        if matches_rem + matches_add + matches_feat > 0:
             diffs.append(diff_string)
 
-    return diffs, matches_rem, matches_add
+    return diffs, matches_rem, matches_add, matches_feat
 
 
 def scan_addon_commits(
@@ -169,7 +199,8 @@ def scan_addon_commits(
     result = []
 
     for commit in commits:
-        summary = commit.message.strip().splitlines()[0]
+        message = commit.message.strip()
+        summary = message.splitlines()[0]
         if "forwardport" in summary.lower().replace(" ", "").replace("-", ""):
             # such ports may present structural changes in the diff
             # but we assume they aren't introducing new changes
@@ -177,44 +208,76 @@ def scan_addon_commits(
             # such false positives were common before version 13.
             continue
 
-        total_changes = 0  # TODO minus / minus
-
+        total_changes = 0
         for file in commit.stats.files:
             if str(file).startswith(module_path):
                 total_changes += commit.stats.files[file]["lines"]
 
-        migration_diffs, matches_rem, matches_add = commit_contains_string(
-            module_path, commit, DB_STRUCTURE_STRINGS
+        migration_diffs, matches_rem, matches_add, matches_feat = (
+            commit_contains_string(module_path, commit, DB_STRUCTURE_STRINGS)
         )
         if matches_rem or matches_add:
-            # now some heuristic to keep only relevant commits.
+            pr = ""
+            for line in message.splitlines():
+                if " odoo/odoo#" in str(line):
+                    pr = str(line).split(" odoo/odoo#")[1].strip()
+
+            # now some heuristics to keep only relevant commits.
             # commits removing fields are the most critical to keep.
             # commits removings or adding just a couple of fields with
             # a small diff are likely to be trivial and are not kept.
             is_noise = True
+            is_big_feature = False
             if (
-                matches_rem > 0
+                # is a change if many structural removals:
+                matches_rem == 1
+                and total_changes > LINE_CHANGE_THRESHOLD
+                and len(message.splitlines()) > 20
+                or matches_rem > 1
                 and total_changes > LINE_CHANGE_THRESHOLD
                 or matches_rem > 2
-                or matches_add > 2
+                # is a change if some removals and many additions:
+                or matches_rem > 1
+                and matches_add > 3
                 and total_changes > LINE_CHANGE_THRESHOLD
-                or matches_add > 3
-                or matches_rem + matches_add > 4
+                # or matches_add > 3
+                # or matches_rem + matches_add > 4
             ):
                 is_noise = False
+
+            if (
+                not is_noise
+                and matches_rem < 4
+                and matches_rem + matches_add < 5
+                and total_changes < 2 * LINE_CHANGE_THRESHOLD
+                and len(message.splitlines()) < 10
+            ):
+                # medium change without too much removal and very little explanation can be skipped
+                print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
+                is_noise = True
+
+            if (
+                is_noise
+                and not "FIX" in summary
+                and total_changes > LINE_CHANGE_FEAT_THRESHOLD
+                and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
+            ) or (
+                is_noise
+                and not "FIX" in summary
+                and matches_add + matches_feat > 5
+                and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
+            ):
+                is_noise = False
+                is_big_feature = True
 
             # you may switch this test off to fine tune the is_noise computation
             if is_noise and not keep_noise:
                 continue
 
-            pr = ""
-            for line in commit.message.splitlines():
-                if " odoo/odoo#" in str(line):
-                    pr = str(line).split(" odoo/odoo#")[1].strip()
-
             result.append(
                 {
                     "is_noise": is_noise,
+                    "is_big_feature": is_big_feature,
                     "commit_sha": commit.hexsha,
                     "total_changes": int(total_changes),
                     "author": commit.author.name,
@@ -222,7 +285,7 @@ def scan_addon_commits(
                         "%Y-%m-%d %H:%M:%S"
                     ),
                     "summary": summary,
-                    "message": commit.message.strip(),
+                    "message": message,
                     "pr": f"https://github.com/odoo/odoo/pull/{pr}",
                     "matches_rem": matches_rem,
                     "matches_add": matches_add,
@@ -243,28 +306,28 @@ def scan_addon_commits(
         print(f"PR: {item['pr']}")
 
         heat_diff = 0
-        if item["total_changes"] > 400:
+        if item["total_changes"] > 800:
+            heat_diff = 4
+        elif item["total_changes"] > 400:
             heat_diff = 3
         elif item["total_changes"] > 200:
             heat_diff = 2
         elif item["total_changes"] > 100:
             heat_diff = 1
-        heat_struct_add = (
-            int(math.log2(item["matches_add"])) if item["matches_add"] else 0
-        )
-        heat_struct_rem = (
-            int(math.log2(item["matches_rem"])) if item["matches_rem"] else 0
-        )
+        heat_struct_add = int(math.log2(item["matches_add"] + 1))
+        heat_struct_rem = int(math.log2(item["matches_rem"] + 1))
         heat = f"{'+'*heat_struct_add}{'-'*heat_struct_rem}{'#'*heat_diff}".rjust(
-            16, "_"
-        )[:16]
+            15, "_"
+        )[:14]
 
         if item["is_noise"]:
             prefix = "__noise"
+        elif item["is_big_feature"]:
+            prefix = "feat"
         else:
             prefix = "c"
 
-        filename = f"{output_module_dir}/{prefix}{str(idx).zfill(3)}{heat}_{item['pr'].split('/')[-1]}_{slugify(item['summary'])[:64]}.patch"
+        filename = f"{output_module_dir}/{prefix}{str(idx).zfill(3)}{heat}_{item['pr'].split('/')[-1]}_{slugify(item['summary'])[:70]}.patch"
         print(filename)
 
         with open(filename, "w") as f:
@@ -285,7 +348,9 @@ def scan_addon_commits(
 
 def list_addons(repo_path: str, excludes: List[str], min_lines=500):
     directory = Path(f"{repo_path}/addons")
-    subdirectories = ["base"]  # NOTE for some reason scanning base can be VERY slow
+    subdirectories = (
+        []
+    )  # ["base"]  # NOTE for some reason scanning base can be VERY slow
     for d in directory.iterdir():
         if not d.is_dir():
             continue
