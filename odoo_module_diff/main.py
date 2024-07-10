@@ -10,7 +10,14 @@ import typer
 
 
 LINE_CHANGE_THRESHOLD = 30
-DB_STRUCTURE_STRINGS = ["= fields.", "_inherit = ", "_inherits = "]
+DB_STRUCTURE_STRINGS = ("= fields.", "_inherit = ", "_inherits = ")
+NON_TRIVIAL_FIELD_ATTRS = (
+    "company_dependent=",
+    "store=",
+    "compute=",
+    "recursive=",
+    "inverse=",
+)
 
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
@@ -64,6 +71,8 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
             prev_line = ""
             prev_prev_line = ""
 
+            prev_line_noreset = ""
+
             for line in diff_item_string.splitlines():
                 if line.startswith("-"):
                     for search_string in search_strings:
@@ -76,6 +85,48 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                 elif line.startswith("+"):
                     for search_string in search_strings:
                         if search_string in (line + prev_line + prev_prev_line):
+                            if (
+                                "= fields." in line and ")" in line
+                            ):  # 1 line field addition assumed
+                                if not any(
+                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
+                                ):
+                                    # not counting addition of trivial fields
+                                    prev_line = line
+                                    prev_prev_line = prev_line
+                                    break
+
+                                elif (
+                                    prev_line_noreset.startswith("-")
+                                    and "= fields." in prev_line_noreset
+                                    and prev_line_noreset[1:].split("=")[0]
+                                    == line[1:].split("=")[0]  # same field name
+                                ):
+                                    non_trivial_prev = set()
+                                    for key in NON_TRIVIAL_FIELD_ATTRS:
+                                        if key in prev_line_noreset:
+                                            value = prev_line_noreset.split(key)[-1]
+                                            value = value.split(",")[0].split(")")[0]
+                                            non_trivial_prev.add(f"{key}{value}")
+
+                                    non_trivial_line = set()
+                                    for key in NON_TRIVIAL_FIELD_ATTRS:
+                                        if key in line:
+                                            value = line.split(key)[-1]
+                                            value = value.split(",")[0].split(")")[0]
+                                            non_trivial_line.add(f"{key}{value}")
+
+                                    if non_trivial_prev == non_trivial_line:
+                                        print(
+                                            "NOT COUNTING TRIVIAL FIELD CHANGE:",
+                                            prev_line_noreset,
+                                            line,
+                                        )
+                                        matches_rem -= 1
+                                        prev_line = ""
+                                        prev_prev_line = ""
+                                        break
+
                             matches_add += 1
                             prev_line = ""
                             prev_prev_line = ""
@@ -84,6 +135,8 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                 else:
                     prev_line = line
                     prev_prev_line = prev_line
+
+                prev_line_noreset = line
 
             diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
 
@@ -182,7 +235,9 @@ def scan_addon_commits(
     for idx, item in enumerate(result):
         # print(f"Commit SHA: {item['commit_sha']}")
         print(f"\nTotal Changes: {item['total_changes']}")
-        print(f"Structural Changes: {item['matches_rem'] + item['matches_add']}")
+        print(
+            f"Non trivial structural Changes: {item['matches_rem'] + item['matches_add']}"
+        )
         print(f"Date: {item['date']}")
         print(f"Summary: {item['summary']}")
         print(f"PR: {item['pr']}")
