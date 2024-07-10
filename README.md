@@ -34,3 +34,6 @@ pip install odoo-module-diff
 python odoo_module_diff/main.py <path_to_repo>/odoo/src 17 --dump-dependencies
 ```
 
+## Example
+
+[Here is a systematic commit analysis between the different Odoo series using odoo-module-diff](https://github.com/akretion/odoo-module-diff-analysis)
