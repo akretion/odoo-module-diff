@@ -11,7 +11,9 @@ A CLI tool to extract key commits impacting database migration between [Odoo](ht
 <!--- install-begin -->
 
 ```console
-pip install odoo-module-diff
+git clone https://github.com/akretion/odoo-module-diff
+cd odoo-module-diff
+pip install .
 ```
 
 ## Features
@@ -31,7 +33,7 @@ pip install odoo-module-diff
 ## Usage
 
 ```console
-python odoo_module_diff/main.py <path_to_repo>/odoo/src 17 --dump-dependencies
+python odoo_module_diff/main.py <path_to_odoo_repo> 17
 ```
 
 ## Example
