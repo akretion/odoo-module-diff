@@ -145,7 +145,7 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                                 break
 
                             if (
-                                "= fields." in line and line.strip(),endswith(")")
+                                "= fields." in line and line.strip().endswith(")")
                             ):  # 1 line field addition assumed
                                 if (
                                     prev_line_noreset.startswith("-")
