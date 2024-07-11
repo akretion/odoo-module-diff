@@ -12,7 +12,6 @@ import typer
 LINE_CHANGE_THRESHOLD = 30
 LINE_CHANGE_FEAT_THRESHOLD = 200
 LINE_MESSAGE_FEAT_THRESHOLD = 45
-DB_STRUCTURE_STRINGS = ("= fields.", "_inherit = ", "_inherits = ")
 NON_TRIVIAL_FIELD_ATTRS = (
     "company_dependent=",
     "store=",
@@ -53,163 +52,224 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     return last_commit, False
 
 
-def commit_contains_string(path: str, commit: git.Commit, search_strings: List[str]):
+def scan_commit(path: str, commit: git.Commit):
     """
     Check if the commit diff contains the specified strings.
-    We count a search_string match only
+    We count a " = fields." match only
     if it's inside a -/+ line or in the 2 lines before.
     """
     matches_rem = 0
     matches_add = 0
     matches_feat = 0
-    diffs = []
+    matches = []
+    diff_items = []
     for parent in commit.parents:
         diff = parent.diff(commit, paths=path, create_patch=True)
         diff_string = ""
         for diff_item in diff:
             diff_item_string = diff_item.diff.decode("utf-8", errors="ignore")
+            diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
 
+            # line, prev_line and prev_prev_line is a kind of 3 lines scanning buffer
             prev_line = ""
             prev_prev_line = ""
-            prev_line_noreset = ""
 
             for line in diff_item_string.splitlines():
-                line_match = False
-                if line.startswith("-"):
-                    for search_string in search_strings:
-                        if (
-                            search_string in line
-                            or search_string in (prev_line + prev_prev_line)
-                            and ")" not in (prev_line + prev_prev_line)
-                        ):
+                line = line.split(" #")[0].strip().replace("\t", " ")
+                reset_scanning_buffer = False
 
-                            if "_inherit" in line and "AbstractModel" in (
-                                prev_line + prev_prev_line
+                if line.startswith("-    ") and not line.startswith("-        "):
+
+                    if (
+                        " _inherit =" in line
+                        or " _inherit =" in prev_line
+                        and prev_line.endswith("[")
+                        or " _inherit =" in prev_prev_line
+                        and prev_prev_line.endswith("[")
+                    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
+                        reset_scanning_buffer = True
+                        matches.append(line)
+                        matches_rem += 1
+
+                    elif (
+                        " _inherits =" in line
+                        or " _inherits =" in prev_line
+                        and prev_line.endswith("[")
+                        or " _inherits =" in prev_prev_line
+                        and prev_prev_line.endswith("[")
+                    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
+                        reset_scanning_buffer = True
+                        matches.append(line)
+                        matches_rem += 1
+
+                    elif (
+                        " = fields." in line
+                        or " = fields." in prev_line
+                        and prev_line.endswith("(")
+                        or " = fields." in prev_prev_line
+                        and prev_prev_line.endswith("(")
+                    ) and not (
+                        # ensure it is not only a trivial attr change
+                        line.count("=") == 1
+                        and " = fields." not in line
+                        and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
+                    ):
+                        reset_scanning_buffer = True
+                        matches.append(line)
+                        if " = fields." not in line:
+                            matches_rem += (
+                                0.4  # wheights less because just an attr change
+                            )
+                        else:
+                            matches_rem += 1
+                        if "2many(" in line:  # relations removal weights more
+                            matches_rem += 1
+
+                elif (
+                    line.startswith("+    ")
+                    and not line.startswith("+        ")
+                    and (
+                        " = fields." in line
+                        or " = fields." in prev_line
+                        and prev_line.endswith("(")
+                        or " = fields." in prev_prev_line
+                        and prev_prev_line.endswith("(")
+                    )
+                    and not (
+                        # ensure it is not only a trivial attr change
+                        line.count("=") == 1
+                        and " = fields." not in line
+                        and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
+                    )
+                ):
+
+                    if " = fields." in line and line.endswith(
+                        ")"
+                    ):  # 1 line field addition assumed
+                        reset_scanning_buffer = True
+
+                        # is it only a minor attr change to a field removed before?
+                        removed_match = None
+                        for match in matches:
+                            if (
+                                not match.startswith("-")
+                                or not match.endswith(")")
+                                or not " = fields." in match
                             ):
-                                break
-
-                            if "_inherit" in (prev_line + prev_prev_line) and (
-                                "[" not in (prev_line + prev_prev_line)
-                                or "]" not in prev_line + prev_prev_line
-                            ):  # not a multiline _inherit statement
-                                break
+                                continue
 
                             if (
-                                # check if change is only a trivial attr change
-                                search_string == "= fields."
-                                and line.count("=") == 1
-                                and search_string not in line
-                                and not any(
-                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
-                                )
+                                match[1:].split("(")[0]
+                                == line[1:].split("(")[0]  # same field name and type
                             ):
+                                removed_match = match
                                 break
 
-                            line_match = True
-                            if search_string not in line:
-                                matches_rem += 0.9
+                        if removed_match:
+                            # new we try to detect trivial field attrs changes:
+                            non_trivial_prev = set()
+                            for key in NON_TRIVIAL_FIELD_ATTRS:
+                                if key in removed_match:
+                                    if key == "compute=":
+                                        value = "some_method"
+                                    else:
+                                        value = removed_match.split(key)[-1]
+                                        value = value.split(",")[0].split(")")[0]
+                                    non_trivial_prev.add(f"{key}{value}")
+
+                            non_trivial_line = set()
+                            for key in NON_TRIVIAL_FIELD_ATTRS:
+                                if key in line:
+                                    if key == "compute=":
+                                        value = "some_method"
+                                    else:
+                                        value = line.split(key)[-1]
+                                        value = value.split(",")[0].split(")")[0]
+                                    non_trivial_line.add(f"{key}{value}")
+
+                            if non_trivial_prev == non_trivial_line:
+                                # print(
+                                #    "  NOT COUNTING trivial field change:",
+                                # )
+                                # print("  " + removed_match)
+                                # print("  " + line)
+                                matches_rem -= 1  # cancel our previous match
+                                if "2many(" in line:  # relations removal weights more
+                                    matches_rem -= 1
+
+                                matches.remove(removed_match)
                             else:
-                                matches_rem += 1
-                            if "2many(" in line:  # relations removal weights more
-                                matches_rem += 1
-                            break
-
-                elif line.startswith("+"):
-                    for search_string in search_strings:
-                        if (
-                            search_string in line
-                            or search_string in (prev_line + prev_prev_line)
-                            and ")" not in (prev_line + prev_prev_line)
-                        ):
-
-                            if "_inherit" in line and "AbstractModel" in (
-                                prev_line + prev_prev_line
-                            ):
-                                break
-
-                            if "_inherit" in (prev_line + prev_prev_line) and (
-                                "[" not in (prev_line + prev_prev_line)
-                                or "]" not in prev_line + prev_prev_line
-                            ):
-                                break
-
-                            if (
-                                # check if change is only a trivial attr change
-                                search_string == "= fields."
-                                and line.count("=") == 1
-                                and search_string not in line
-                                and not any(
-                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
+                                matches_rem -= (
+                                    0.6  # field isn't removed but some attr changed
                                 )
-                            ):
-                                break
+                                if "2many(" in line:  # relations removal weights more
+                                    matches_rem -= 1
+                                matches.append(line)  # we help diff visualization
 
-                            if (
-                                "= fields." in line and line.strip().endswith(")")
-                            ):  # 1 line field addition assumed
-                                if (
-                                    prev_line_noreset.startswith("-")
-                                    and "= fields." in prev_line_noreset
-                                    and prev_line_noreset[1:].split("=")[0]
-                                    == line[1:].split("=")[0]  # same field name
-                                ):
-                                    # new we try to detect trivial field attrs changes:
-                                    non_trivial_prev = set()
-                                    for key in NON_TRIVIAL_FIELD_ATTRS:
-                                        if key in prev_line_noreset:
-                                            value = prev_line_noreset.split(key)[-1]
-                                            value = value.split(",")[0].split(")")[0]
-                                            non_trivial_prev.add(f"{key}{value}")
+                        else:
+                            if "2many(" in line:  # adding relations weights more
+                                matches_add += 1
+                                matches.append(line)
+                            else:  # non relational field addition give no migration work
+                                matches_feat += 1
 
-                                    non_trivial_line = set()
-                                    for key in NON_TRIVIAL_FIELD_ATTRS:
-                                        if key in line:
-                                            value = line.split(key)[-1]
-                                            value = value.split(",")[0].split(")")[0]
-                                            non_trivial_line.add(f"{key}{value}")
+                                # same field already removed? Can we help to vizualize it?
+                                for match in matches:
+                                    if (
+                                        not match.startswith("-")
+                                        or not " = fields." in match
+                                    ):
+                                        continue
 
-                                    if non_trivial_prev == non_trivial_line:
-                                        # print(
-                                        #    "  not counting trivial field change:",
-                                        #    prev_line_noreset,
-                                        #    line,
-                                        # )
-                                        matches_rem -= 1  # cancel our previous match
-                                        line_match = False
+                                    if (
+                                        match[1:].split("(")[0]
+                                        == line[1:].split("(")[
+                                            0
+                                        ]  # same field name and type
+                                    ):
+                                        matches.append(line)
                                         break
 
-                                elif not "2many(" in line and not any(
-                                    key in line for key in NON_TRIVIAL_FIELD_ATTRS
-                                ):
-                                    # not counting addition of trivial fields because no migration work
-                                    # prev_line = line
-                                    # prev_prev_line = prev_line
-                                    line_match = True
-                                    matches_feat += 1
-                                    break
-
-                            line_match = True
-                            if search_string not in line:
-                                matches_add += 0.9
-                            else:
+                    else:  # multiline field attr additive change
+                        if " = fields." in line:
+                            reset_scanning_buffer = True
+                            if "2many(" in line:
                                 matches_add += 1
-                            if "2many" in line:  # adding relations weights more
-                                matches_add += 1
-                            break
+                                matches.append(line)
+                            else:  # non relational field addition give no migration work
+                                matches_feat += 1
 
-                if line_match:
-                    prev_line = prev_prev_line = ""  # reset scanning buffer
+                                # same field already removed? Can we help to vizualize it?
+                                for match in matches:
+                                    if (
+                                        not match.startswith("-")
+                                        or not " = fields." in match
+                                    ):
+                                        continue
+
+                                    if (
+                                        match[1:].split("(")[0]
+                                        == line[1:].split("(")[
+                                            0
+                                        ]  # same field name and type
+                                    ):
+                                        matches_rem -= 0.6  # field isn't removed but some attr changed
+                                        matches.append(line)
+                                        break
+
+                        else:
+                            matches_add += 0.2  # weights less because only a trivial attr additive change
+
+                if reset_scanning_buffer:
+                    prev_line = prev_prev_line = ""  # reset the scanning buffer
                 else:
                     prev_prev_line = prev_line
                     prev_line = line
-                prev_line_noreset = line
-
-            diff_string += f"\n--- a/{diff_item.a_path}\n+++ b/{diff_item.b_path}\n{diff_item_string}"
 
         if matches_rem + matches_add + matches_feat > 0:
-            diffs.append(diff_string)
+            diff_items.append(diff_string)
 
-    return diffs, matches_rem, matches_add, matches_feat
+    return diff_items, matches_rem, matches_add, matches_feat, matches
 
 
 def scan_addon_commits(
@@ -229,6 +289,11 @@ def scan_addon_commits(
     commits = list(
         repo.iter_commits(
             f"{start_commit.hexsha}..{end_commit.hexsha}", paths=module_path
+        )
+    )
+    print(
+        f"\n***** scanning {len(commits)} commits in addon: {addon}/models ".ljust(
+            80, "*"
         )
     )
 
@@ -252,10 +317,10 @@ def scan_addon_commits(
             if str(file).startswith(module_path):
                 total_changes += commit.stats.files[file]["lines"]
 
-        migration_diffs, matches_rem, matches_add, matches_feat = (
-            commit_contains_string(module_path, commit, DB_STRUCTURE_STRINGS)
+        migration_diffs, matches_rem, matches_add, matches_feat, matches = scan_commit(
+            module_path, commit
         )
-        if matches_rem or matches_add:
+        if matches_rem or matches_add or matches_feat:
             pr = ""
             for line in message.splitlines():
                 if " odoo/odoo#" in str(line):
@@ -272,7 +337,7 @@ def scan_addon_commits(
                 matches_rem == 1
                 and total_changes > LINE_CHANGE_THRESHOLD
                 and len(message.splitlines()) > 20
-                or matches_rem > 1
+                or matches_rem == 2
                 and total_changes > LINE_CHANGE_THRESHOLD
                 or matches_rem > 2
                 # is a change if some removals and many additions:
@@ -329,10 +394,14 @@ def scan_addon_commits(
                     "matches_rem": matches_rem,
                     "matches_add": matches_add,
                     "diffs": migration_diffs,
+                    "matches": matches,
                 }
             )
 
     # Output the result
+    if result:
+        os.makedirs(output_module_dir, exist_ok=True)
+
     result.reverse()
     for idx, item in enumerate(result):
         # print(f"Commit SHA: {item['commit_sha']}")
@@ -356,8 +425,8 @@ def scan_addon_commits(
         heat_struct_add = int(math.log2(item["matches_add"] + 1))
         heat_struct_rem = int(math.log2(item["matches_rem"] + 1))
         heat = f"{'+'*heat_struct_add}{'-'*heat_struct_rem}{'#'*heat_diff}".rjust(
-            15, "_"
-        )[:14]
+            14, "_"
+        )[: (10 if item["is_big_feature"] else 13)]
 
         if item["is_noise"]:
             prefix = "__noise"
@@ -375,9 +444,11 @@ def scan_addon_commits(
             f.write(f"\nFrom: {item['author']}")
             f.write(f"\nDate: {item['date']}")
             f.write(
-                f"\n\nStructural Changes: {item['matches_rem'] + item['matches_add']}"
+                f"\n\nBreaking data model changes score: {item['matches_rem'] + item['matches_add']}, change matches:"
             )
-            f.write(f"\nTotal Changes: {item['total_changes']}")
+            for match in item["matches"]:
+                f.write("\n" + match)
+            f.write(f"\n\nTotal Changes: {item['total_changes']}")
             f.write("\n\n" + item["message"])
             f.write("\n\n" + "=" * 33 + " pseudo patch: " + "=" * 33 + "\n")
             for diffs in item["diffs"]:
@@ -485,14 +556,13 @@ def scan(
         serie = f"{target_serie - 1}.0"
 
     for addon in addons:
-        print(f"\n***** scanning addon: {addon} ".ljust(40, "*"))
-
         output_module_dir = (
             f"{output_dir}/{addon}"  # TODO we might add a version dir for OpenUpgrade
         )
-        os.makedirs(output_module_dir, exist_ok=True)
 
-        if dump_dependencies:
+        if dump_dependencies:  # TODO move to scan_addon_commits
+            os.makedirs(output_module_dir, exist_ok=True)
+
             # expliciting all dependencies can help OpenUpgrade developpers or even improve AI migration training
             result = subprocess.run(
                 [
