@@ -91,7 +91,7 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                             if "_inherit" in (prev_line + prev_prev_line) and (
                                 "[" not in (prev_line + prev_prev_line)
                                 or "]" not in prev_line + prev_prev_line
-                            ):
+                            ):  # not a multiline _inherit statement
                                 break
 
                             if (
@@ -145,7 +145,7 @@ def commit_contains_string(path: str, commit: git.Commit, search_strings: List[s
                                 break
 
                             if (
-                                "= fields." in line and ")" in line
+                                "= fields." in line and line.strip(),endswith(")")
                             ):  # 1 line field addition assumed
                                 if (
                                     prev_line_noreset.startswith("-")
