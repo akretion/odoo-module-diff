@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,7 @@ NON_TRIVIAL_FIELD_ATTRS = (
     "recursive=",
     # "inverse=",
 )
+ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
@@ -52,6 +54,163 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     return last_commit, False
 
 
+def scan_diff_line_removal(
+    line: str,
+    matches_add: float,
+    matches_rem: float,
+    matches_feat: float,
+    matches: List[str],
+    prev_line: str,
+    prev_prev_line: str,
+    reset_scanning_buffer: bool,
+):
+    if (
+        " _inherit =" in line
+        or " _inherit =" in prev_line
+        and prev_line.endswith("[")
+        or " _inherit =" in prev_prev_line
+        and prev_prev_line.endswith("[")
+    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
+        reset_scanning_buffer = True
+        matches.append(line)
+        matches_rem += 1
+
+    elif (
+        " _inherits =" in line
+        or " _inherits =" in prev_line
+        and prev_line.endswith("[")
+        or " _inherits =" in prev_prev_line
+        and prev_prev_line.endswith("[")
+    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
+        reset_scanning_buffer = True
+        matches.append(line)
+        matches_rem += 1
+
+    elif (
+        " = fields." in line
+        or " = fields." in prev_line
+        and prev_line.endswith("(")
+        or " = fields." in prev_prev_line
+        and prev_prev_line.endswith("(")
+    ) and not (
+        # ensure it is not only a trivial attr change
+        line.count("=") == 1
+        and " = fields." not in line
+        and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
+    ):
+        reset_scanning_buffer = True
+        matches.append(line)
+        if " = fields." not in line:
+            matches_rem += 0.4  # wheights less because just an attr change
+        else:
+            matches_rem += 1
+        if "2many(" in line:  # relations removal weights more
+            matches_rem += 1
+
+    return (
+        line,
+        matches_add,
+        matches_rem,
+        matches_feat,
+        matches,
+        prev_line,
+        prev_prev_line,
+        reset_scanning_buffer,
+    )
+
+
+def scan_diff_line_addition(
+    line: str,
+    matches_add: float,
+    matches_rem: float,
+    matches_feat: float,
+    matches: List[str],
+    prev_line: str,
+    prev_prev_line: str,
+    reset_scanning_buffer: bool,
+):
+    if " = fields." in line:
+        reset_scanning_buffer = True
+
+        # is it only a minor attr change to a field removed before?
+        removed_match = None
+        for match in matches:
+            if (
+                not match.startswith("-")
+                # or not match.endswith(")")
+                or " = fields." not in match
+            ):
+                continue
+
+            if (
+                match[1:].split("(")[0]
+                == line[1:].split("(")[0]  # same field name and type
+            ):
+                removed_match = match
+                break
+
+        if removed_match:
+            # new we try to detect trivial field attrs changes:
+            non_trivial_prev = set()
+            for key in NON_TRIVIAL_FIELD_ATTRS:
+                if key in removed_match:
+                    if key == "compute=":
+                        # we don't want to track the exact compute method
+                        value = "some_method"
+                    else:
+                        value = removed_match.split(key)[-1]
+                        value = value.split(",")[0].split(")")[0]
+                    non_trivial_prev.add(f"{key}{value}")
+
+            non_trivial_line = set()
+            for key in NON_TRIVIAL_FIELD_ATTRS:
+                if key in line:
+                    if key == "compute=":
+                        # we don't want to track the exact compute method
+                        value = "some_method"
+                    else:
+                        value = line.split(key)[-1]
+                        value = value.split(",")[0].split(")")[0]
+                    non_trivial_line.add(f"{key}{value}")
+
+            if non_trivial_prev == non_trivial_line:
+                # print(
+                #    "  NOT COUNTING trivial field change:",
+                # )
+                # print("  " + removed_match)
+                # print("  " + line)
+                matches_rem -= 1  # cancel our previous match
+                if "2many(" in line:  # relations removal weights more
+                    matches_rem -= 1
+
+                matches.remove(removed_match)
+            else:
+                matches_rem -= 0.6  # field isn't removed but some attr changed
+                if "2many(" in line:  # relations removal weights more
+                    matches_rem -= 1
+                matches.append(line)  # we help diff visualization
+
+        else:
+            if "2many(" in line:  # adding relations weights more
+                matches_add += 1
+                matches.append(line)
+            else:  # non relational field addition give no migration work
+                matches_feat += 1
+    else:
+        matches_add += 0.2  # weights less because only a trivial attr additive change
+
+    return (
+        line,
+        matches_add,
+        matches_rem,
+        matches_feat,
+        matches,
+        prev_line,
+        prev_prev_line,
+        reset_scanning_buffer,
+    )
+
+
 def scan_commit(path: str, commit: git.Commit):
     """
     Check if the commit diff contains the specified strings.
@@ -79,50 +238,25 @@ def scan_commit(path: str, commit: git.Commit):
                 reset_scanning_buffer = False
 
                 if line.startswith("-    ") and not line.startswith("-        "):
-                    if (
-                        " _inherit =" in line
-                        or " _inherit =" in prev_line
-                        and prev_line.endswith("[")
-                        or " _inherit =" in prev_prev_line
-                        and prev_prev_line.endswith("[")
-                    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
-                        reset_scanning_buffer = True
-                        matches.append(line)
-                        matches_rem += 1
-
-                    elif (
-                        " _inherits =" in line
-                        or " _inherits =" in prev_line
-                        and prev_line.endswith("[")
-                        or " _inherits =" in prev_prev_line
-                        and prev_prev_line.endswith("[")
-                    ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
-                        reset_scanning_buffer = True
-                        matches.append(line)
-                        matches_rem += 1
-
-                    elif (
-                        " = fields." in line
-                        or " = fields." in prev_line
-                        and prev_line.endswith("(")
-                        or " = fields." in prev_prev_line
-                        and prev_prev_line.endswith("(")
-                    ) and not (
-                        # ensure it is not only a trivial attr change
-                        line.count("=") == 1
-                        and " = fields." not in line
-                        and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
-                    ):
-                        reset_scanning_buffer = True
-                        matches.append(line)
-                        if " = fields." not in line:
-                            matches_rem += (
-                                0.4  # wheights less because just an attr change
-                            )
-                        else:
-                            matches_rem += 1
-                        if "2many(" in line:  # relations removal weights more
-                            matches_rem += 1
+                    (
+                        line,
+                        matches_add,
+                        matches_rem,
+                        matches_feat,
+                        matches,
+                        prev_line,
+                        prev_prev_line,
+                        reset_scanning_buffer,
+                    ) = scan_diff_line_removal(
+                        line,
+                        matches_add,
+                        matches_rem,
+                        matches_feat,
+                        matches,
+                        prev_line,
+                        prev_prev_line,
+                        reset_scanning_buffer,
+                    )
 
                 elif (
                     line.startswith("+    ")
@@ -141,122 +275,25 @@ def scan_commit(path: str, commit: git.Commit):
                         and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
                     )
                 ):
-                    if " = fields." in line and line.endswith(
-                        ")"
-                    ):  # 1 line field addition assumed
-                        reset_scanning_buffer = True
-
-                        # is it only a minor attr change to a field removed before?
-                        removed_match = None
-                        for match in matches:
-                            if (
-                                not match.startswith("-")
-                                or not match.endswith(")")
-                                or not " = fields." in match
-                            ):
-                                continue
-
-                            if (
-                                match[1:].split("(")[0]
-                                == line[1:].split("(")[0]  # same field name and type
-                            ):
-                                removed_match = match
-                                break
-
-                        if removed_match:
-                            # new we try to detect trivial field attrs changes:
-                            non_trivial_prev = set()
-                            for key in NON_TRIVIAL_FIELD_ATTRS:
-                                if key in removed_match:
-                                    if key == "compute=":
-                                        value = "some_method"
-                                    else:
-                                        value = removed_match.split(key)[-1]
-                                        value = value.split(",")[0].split(")")[0]
-                                    non_trivial_prev.add(f"{key}{value}")
-
-                            non_trivial_line = set()
-                            for key in NON_TRIVIAL_FIELD_ATTRS:
-                                if key in line:
-                                    if key == "compute=":
-                                        value = "some_method"
-                                    else:
-                                        value = line.split(key)[-1]
-                                        value = value.split(",")[0].split(")")[0]
-                                    non_trivial_line.add(f"{key}{value}")
-
-                            if non_trivial_prev == non_trivial_line:
-                                # print(
-                                #    "  NOT COUNTING trivial field change:",
-                                # )
-                                # print("  " + removed_match)
-                                # print("  " + line)
-                                matches_rem -= 1  # cancel our previous match
-                                if "2many(" in line:  # relations removal weights more
-                                    matches_rem -= 1
-
-                                matches.remove(removed_match)
-                            else:
-                                matches_rem -= (
-                                    0.6  # field isn't removed but some attr changed
-                                )
-                                if "2many(" in line:  # relations removal weights more
-                                    matches_rem -= 1
-                                matches.append(line)  # we help diff visualization
-
-                        else:
-                            if "2many(" in line:  # adding relations weights more
-                                matches_add += 1
-                                matches.append(line)
-                            else:  # non relational field addition give no migration work
-                                matches_feat += 1
-
-                                # same field already removed? Can we help to vizualize it?
-                                for match in matches:
-                                    if (
-                                        not match.startswith("-")
-                                        or not " = fields." in match
-                                    ):
-                                        continue
-
-                                    if (
-                                        match[1:].split("(")[0]
-                                        == line[1:].split("(")[
-                                            0
-                                        ]  # same field name and type
-                                    ):
-                                        matches.append(line)
-                                        break
-
-                    else:  # multiline field attr additive change
-                        if " = fields." in line:
-                            reset_scanning_buffer = True
-                            if "2many(" in line:
-                                matches_add += 1
-                                matches.append(line)
-                            else:  # non relational field addition give no migration work
-                                matches_feat += 1
-
-                                # same field already removed? Can we help to vizualize it?
-                                for match in matches:
-                                    if (
-                                        not match.startswith("-")
-                                        or not " = fields." in match
-                                    ):
-                                        continue
-
-                                    if (
-                                        match[1:].split("(")[0]
-                                        == line[1:].split("(")[
-                                            0
-                                        ]  # same field name and type
-                                    ):
-                                        matches_rem -= 0.6  # field isn't removed but some attr changed
-                                        matches.append(line)
-                                        break
-
-                        else:
-                            matches_add += 0.2  # weights less because only a trivial attr additive change
+                    (
+                        line,
+                        matches_add,
+                        matches_rem,
+                        matches_feat,
+                        matches,
+                        prev_line,
+                        prev_prev_line,
+                        reset_scanning_buffer,
+                    ) = scan_diff_line_addition(
+                        line,
+                        matches_add,
+                        matches_rem,
+                        matches_feat,
+                        matches,
+                        prev_line,
+                        prev_prev_line,
+                        reset_scanning_buffer,
+                    )
 
                 if reset_scanning_buffer:
                     prev_line = prev_prev_line = ""  # reset the scanning buffer
@@ -423,8 +460,8 @@ def scan_addon_commits(
         heat_struct_add = int(math.log2(item["matches_add"] + 1))
         heat_struct_rem = int(math.log2(item["matches_rem"] + 1))
         heat = f"{'+'*heat_struct_add}{'-'*heat_struct_rem}{'#'*heat_diff}".rjust(
-            14, "_"
-        )[: (10 if item["is_big_feature"] else 13)]
+            13, "_"
+        )[: (9 if item["is_big_feature"] else 12)]
 
         if item["is_noise"]:
             prefix = "__noise"
@@ -447,14 +484,14 @@ def scan_addon_commits(
             for match in item["matches"]:
                 f.write("\n" + match)
             f.write(f"\n\nTotal Changes: {item['total_changes']}")
-            f.write("\n\n" + item["message"])
+            f.write("\n\n" + re.sub(r"^-", "*", item["message"], flags=re.MULTILINE))
             f.write("\n\n" + "=" * 33 + " pseudo patch: " + "=" * 33 + "\n")
             for diffs in item["diffs"]:
                 for diff_item in diffs:
                     f.write(diff_item)
 
 
-def list_addons(repo_path: str, excludes: List[str], min_lines=500):
+def list_addons(repo_path: str, excludes: List[str]):
     directory = Path(f"{repo_path}/addons")
     subdirectories = ["base"]
     for d in directory.iterdir():
@@ -469,21 +506,6 @@ def list_addons(repo_path: str, excludes: List[str], min_lines=500):
         if is_excluded:
             continue
 
-        if min_lines:
-            total_lines = 0
-            # Walk through the directory
-            for root, _, files in os.walk(d):
-                for file in files:
-                    if file.endswith(".py"):
-                        file_path = os.path.join(root, file)
-                        with open(
-                            file_path, "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            # Count lines in the file
-                            total_lines += sum(1 for _ in f)
-            if total_lines < min_lines:
-                continue
-
         subdirectories.append(d.name)
     return subdirectories
 
@@ -495,6 +517,7 @@ def scan(
     addon: str = "",
     dump_dependencies: bool = False,
     keep_noise: bool = False,
+    commit: str = "",
 ):
     # Initialize local repo object
     repo = git.Repo(repo_path)
@@ -502,21 +525,24 @@ def scan(
     print(f"git checkout {target_serie}.0 ...")
     repo.git.checkout(f"{target_serie}.0")
 
-    # Get the commits for the branches
-    print(f"getting the merge base with previous serie {target_serie - 1}.0 ...")
-    target_serie_commit = repo.commit(f"{target_serie}.0")
-    prev_serie_commit = repo.commit(f"{target_serie - 1}.0")
-    merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
-    start_commit = merge_base[0]
-
     if addon:
         addons = [addon]
     else:
         addons = list_addons(
             repo_path,
-            excludes=["l10n_", "website_", "test"],
-            min_lines=500,
+            excludes=ADDON_PREFIX_FILTER,
         )
+    print(f"Will scan {len(addons)} addons. (applied filter {ADDON_PREFIX_FILTER})")
+
+    if commit:
+        start_commit = repo.commit(commit).parents[0]
+    else:
+        # Get the commits for the branches
+        print(f"Getting the merge base with previous serie {target_serie - 1}.0 ...")
+        target_serie_commit = repo.commit(f"{target_serie}.0")
+        prev_serie_commit = repo.commit(f"{target_serie - 1}.0")
+        merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
+        start_commit = merge_base[0]
 
     start_date = datetime.fromtimestamp(start_commit.committed_date).strftime(
         "%Y-%m-%d %H:%M:%S"
@@ -525,14 +551,18 @@ def scan(
         f"Start commit {start_commit} - {start_date}: {start_commit.message.splitlines()[0].strip()}"
     )
 
-    # Find the end commit
-    end_commit, end_found = find_end_commit_by_serie(repo, target_serie)
-    end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    print(
-        f"End commit {end_commit} - {end_date}: {end_commit.message.splitlines()[0].strip()}"
-    )
+    if commit:
+        end_commit = repo.commit(commit)
+        end_found = True
+    else:
+        # Find the end commit
+        end_commit, end_found = find_end_commit_by_serie(repo, target_serie)
+        end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        print(
+            f"End commit {end_commit} - {end_date}: {end_commit.message.splitlines()[0].strip()}"
+        )
 
     # Ensure both commits are found
     if not start_commit or not end_commit:
@@ -542,7 +572,7 @@ def scan(
         exit(1)
 
     # Ensure both commits are different
-    if start_commit == end_commit:
+    if start_commit == end_commit and not commit:
         print(
             f"Error! start_commit and end_commit are equal to {start_commit}! You may need to checkout the target serie branch or master first!"
         )
@@ -631,6 +661,7 @@ def main(
     wrap_serie_dir: bool = True,
     dump_dependencies: bool = False,
     keep_noise: bool = False,
+    commit: str = "",
 ):
     target_serie = int(target_serie)  # (float this allows .0)
     if wrap_serie_dir and str(target_serie) not in output_dir:
@@ -642,6 +673,7 @@ def main(
         output_dir=output_dir,
         dump_dependencies=dump_dependencies,
         keep_noise=keep_noise,
+        commit=commit,
     )
 
 
