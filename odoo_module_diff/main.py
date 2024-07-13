@@ -1,13 +1,13 @@
-import os
 import math
-import git
-from pathlib import Path
-from datetime import datetime
-from slugify import slugify
-from typing import List
+import os
 import subprocess
-import typer
+from datetime import datetime
+from pathlib import Path
+from typing import List
 
+import git
+import typer
+from slugify import slugify
 
 LINE_CHANGE_THRESHOLD = 30
 LINE_CHANGE_FEAT_THRESHOLD = 200
@@ -23,7 +23,7 @@ NON_TRIVIAL_FIELD_ATTRS = (
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     """
-    Find the first commit with a specific message.
+    Find the most recent commit with a specific message.
     Return the more recent commit if no match is found.
     """
     if target_serie == 16:
@@ -79,7 +79,6 @@ def scan_commit(path: str, commit: git.Commit):
                 reset_scanning_buffer = False
 
                 if line.startswith("-    ") and not line.startswith("-        "):
-
                     if (
                         " _inherit =" in line
                         or " _inherit =" in prev_line
@@ -142,7 +141,6 @@ def scan_commit(path: str, commit: git.Commit):
                         and not any(key in line for key in NON_TRIVIAL_FIELD_ATTRS)
                     )
                 ):
-
                     if " = fields." in line and line.endswith(
                         ")"
                     ):  # 1 line field addition assumed
