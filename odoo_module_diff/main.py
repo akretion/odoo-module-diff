@@ -10,7 +10,7 @@ import git
 import typer
 from slugify import slugify
 
-LINE_CHANGE_THRESHOLD = 30
+LINE_CHANGE_THRESHOLD = 25
 LINE_CHANGE_FEAT_THRESHOLD = 200
 LINE_MESSAGE_FEAT_THRESHOLD = 45
 NON_TRIVIAL_FIELD_ATTRS = (
@@ -389,7 +389,7 @@ def scan_addon_commits(
                 and matches_rem < 4
                 and matches_rem + matches_add < 5
                 and total_changes < 2 * LINE_CHANGE_THRESHOLD
-                and len(message.splitlines()) < 10
+                and len(message.splitlines()) < 9
             ):
                 # medium change without too much removal and very little explanation can be skipped
                 print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
