@@ -101,7 +101,7 @@ def scan_diff_line_removal(
         reset_scanning_buffer = True
         matches.append(line)
         if " = fields." not in line:
-            score_del += 0.5  # wheights less because just an important attr change
+            score_del += 0.4  # wheights less because just an important attr change
         else:
             score_del += 1
         if "2many(" in line:  # relations removal weights more
@@ -199,7 +199,7 @@ def scan_diff_line_addition(
 
                 matches.remove(removed_match)
             else:
-                score_del -= 0.5  # field isn't removed but some important attr changed
+                score_del -= 0.6  # field isn't removed but some important attr changed
                 if "2many(" in line:  # revert relations removal score
                     score_del -= 1
                 matches.append(line)  # we help diff visualization
