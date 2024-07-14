@@ -56,9 +56,9 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
 
 def scan_diff_line_removal(
     line: str,
-    matches_add: float,
-    matches_rem: float,
-    matches_feat: float,
+    score_add: float,
+    score_del: float,
+    score_feat: float,
     matches: List[str],
     prev_line: str,
     prev_prev_line: str,
@@ -73,7 +73,7 @@ def scan_diff_line_removal(
     ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
         reset_scanning_buffer = True
         matches.append(line)
-        matches_rem += 1
+        score_del += 1
 
     elif (
         " _inherits =" in line
@@ -84,7 +84,7 @@ def scan_diff_line_removal(
     ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
         reset_scanning_buffer = True
         matches.append(line)
-        matches_rem += 1
+        score_del += 1
 
     elif (
         " = fields." in line
@@ -101,17 +101,17 @@ def scan_diff_line_removal(
         reset_scanning_buffer = True
         matches.append(line)
         if " = fields." not in line:
-            matches_rem += 0.5  # wheights less because just an important attr change
+            score_del += 0.5  # wheights less because just an important attr change
         else:
-            matches_rem += 1
+            score_del += 1
         if "2many(" in line:  # relations removal weights more
-            matches_rem += 1
+            score_del += 1
 
     return (
         line,
-        matches_add,
-        matches_rem,
-        matches_feat,
+        score_add,
+        score_del,
+        score_feat,
         matches,
         prev_line,
         prev_prev_line,
@@ -121,9 +121,9 @@ def scan_diff_line_removal(
 
 def scan_diff_line_addition(
     line: str,
-    matches_add: float,
-    matches_rem: float,
-    matches_feat: float,
+    score_add: float,
+    score_del: float,
+    score_feat: float,
     matches: List[str],
     prev_line: str,
     prev_prev_line: str,
@@ -193,33 +193,31 @@ def scan_diff_line_addition(
 
             if non_trivial_prev == non_trivial_line:
                 # som unimportant attr change, let's revert the removal score
-                matches_rem -= 1  # cancel our previous match
+                score_del -= 1  # cancel our previous match
                 if "2many(" in line:  # relations removal weights more
-                    matches_rem -= 1
+                    score_del -= 1
 
                 matches.remove(removed_match)
             else:
-                matches_rem -= (
-                    0.5  # field isn't removed but some important attr changed
-                )
+                score_del -= 0.5  # field isn't removed but some important attr changed
                 if "2many(" in line:  # revert relations removal score
-                    matches_rem -= 1
+                    score_del -= 1
                 matches.append(line)  # we help diff visualization
 
         else:
             # it's really a new field addition
-            matches_feat += 1
+            score_feat += 1
             if "2many(" in line:  # adding relations weights more
-                matches_add += 1
+                score_add += 1
                 matches.append(line)
     else:
-        matches_add += 0.4  # weights less because only an attr additive change
+        score_add += 0.4  # weights less because only an attr additive change
 
     return (
         line,
-        matches_add,
-        matches_rem,
-        matches_feat,
+        score_add,
+        score_del,
+        score_feat,
         matches,
         prev_line,
         prev_prev_line,
@@ -233,9 +231,9 @@ def scan_commit(path: str, commit: git.Commit):
     We count a " = fields." match only
     if it's inside a -/+ line or in the 2 lines before.
     """
-    matches_rem = 0
-    matches_add = 0
-    matches_feat = 0
+    score_del = 0
+    score_add = 0
+    score_feat = 0
     matches = []
     diff_items = []
     for parent in commit.parents:
@@ -271,18 +269,18 @@ def scan_commit(path: str, commit: git.Commit):
                 if line.startswith("-    ") and not line.startswith("-        "):
                     (
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
                         reset_scanning_buffer,
                     ) = scan_diff_line_removal(
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
@@ -308,18 +306,18 @@ def scan_commit(path: str, commit: git.Commit):
                 ):
                     (
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
                         reset_scanning_buffer,
                     ) = scan_diff_line_addition(
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
@@ -332,10 +330,10 @@ def scan_commit(path: str, commit: git.Commit):
                     prev_prev_line = prev_line
                     prev_line = line
 
-        if matches_rem + matches_add + matches_feat > 0:
+        if score_del + score_add + score_feat > 0:
             diff_items.append(diff_string)
 
-    return diff_items, matches_rem, matches_add, matches_feat, matches
+    return diff_items, score_del, score_add, score_feat, matches
 
 
 def scan_addon_commits(
