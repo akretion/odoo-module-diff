@@ -11,8 +11,8 @@ import typer
 from slugify import slugify
 
 LINE_CHANGE_THRESHOLD = 25
-LINE_CHANGE_FEAT_THRESHOLD = 200
-LINE_MESSAGE_FEAT_THRESHOLD = 45
+LINE_CHANGE_FEAT_THRESHOLD = 140
+LINE_MESSAGE_FEAT_THRESHOLD = 40
 NON_TRIVIAL_FIELD_ATTRS = (
     "company_dependent=",
     "store=",
@@ -101,7 +101,7 @@ def scan_diff_line_removal(
         reset_scanning_buffer = True
         matches.append(line)
         if " = fields." not in line:
-            matches_rem += 0.4  # wheights less because just an attr change
+            matches_rem += 0.5  # wheights less because just an important attr change
         else:
             matches_rem += 1
         if "2many(" in line:  # relations removal weights more
@@ -143,8 +143,26 @@ def scan_diff_line_addition(
                 continue
 
             if (
-                match[1:].split("(")[0]
-                == line[1:].split("(")[0]  # same field name and type
+                (
+                    match[1:].split("(")[0]
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Char", "fields.Text")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Char", "fields.Html")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Text", "fields.Html")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Integer", "fields.Float")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
             ):
                 removed_match = match
                 break
@@ -174,30 +192,28 @@ def scan_diff_line_addition(
                     non_trivial_line.add(f"{key}{value}")
 
             if non_trivial_prev == non_trivial_line:
-                # print(
-                #    "  NOT COUNTING trivial field change:",
-                # )
-                # print("  " + removed_match)
-                # print("  " + line)
+                # som unimportant attr change, let's revert the removal score
                 matches_rem -= 1  # cancel our previous match
                 if "2many(" in line:  # relations removal weights more
                     matches_rem -= 1
 
                 matches.remove(removed_match)
             else:
-                matches_rem -= 0.6  # field isn't removed but some attr changed
-                if "2many(" in line:  # relations removal weights more
+                matches_rem -= (
+                    0.5  # field isn't removed but some important attr changed
+                )
+                if "2many(" in line:  # revert relations removal score
                     matches_rem -= 1
                 matches.append(line)  # we help diff visualization
 
         else:
+            # it's really a new field addition
+            matches_feat += 1
             if "2many(" in line:  # adding relations weights more
                 matches_add += 1
                 matches.append(line)
-            else:  # non relational field addition give no migration work
-                matches_feat += 1
     else:
-        matches_add += 0.2  # weights less because only a trivial attr additive change
+        matches_add += 0.4  # weights less because only an attr additive change
 
     return (
         line,
@@ -232,10 +248,25 @@ def scan_commit(path: str, commit: git.Commit):
             # line, prev_line and prev_prev_line is a kind of 3 lines scanning buffer
             prev_line = ""
             prev_prev_line = ""
+            is_abstract_model = False
 
             for line in diff_item_string.splitlines():
                 line = line.split(" #")[0].strip().replace("\t", " ")
                 reset_scanning_buffer = False
+                if line.startswith("@@ "):
+                    if "AbstractModel" in line:
+                        is_abstract_model = True
+                    else:
+                        is_abstract_model = False
+
+                elif line[1:].startswith("class "):
+                    if "AbstractModel" in line:
+                        is_abstract_model = True
+                    else:
+                        is_abstract_model = False
+
+                if is_abstract_model:
+                    continue
 
                 if line.startswith("-    ") and not line.startswith("-        "):
                     (
@@ -369,10 +400,10 @@ def scan_addon_commits(
             is_big_feature = False
             if (
                 # is a change if many structural removals:
-                matches_rem == 1
+                matches_rem >= 1
                 and total_changes > LINE_CHANGE_THRESHOLD
                 and len(message.splitlines()) > 20
-                or matches_rem == 2
+                or matches_rem >= 2
                 and total_changes > LINE_CHANGE_THRESHOLD
                 or matches_rem > 2
                 # is a change if some removals and many additions:
@@ -395,7 +426,7 @@ def scan_addon_commits(
                 print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
                 is_noise = True
 
-            if (
+            elif (
                 is_noise
                 and not "FIX" in summary
                 and total_changes > LINE_CHANGE_FEAT_THRESHOLD
@@ -442,7 +473,7 @@ def scan_addon_commits(
         # print(f"Commit SHA: {item['commit_sha']}")
         print(f"\nTotal Changes: {item['total_changes']}")
         print(
-            f"Non trivial structural Changes: {item['matches_rem'] + item['matches_add']}"
+            f"Non trivial structural Changes: {item['matches_rem']} + {item['matches_add']}"
         )
         print(f"Date: {item['date']}")
         print(f"Summary: {item['summary']}")
@@ -478,9 +509,10 @@ def scan_addon_commits(
             f.write(f"\n\nFrom: {item['commit_sha']}")
             f.write(f"\nFrom: {item['author']}")
             f.write(f"\nDate: {item['date']}")
-            f.write(
-                f"\n\nBreaking data model changes score: {item['matches_rem'] + item['matches_add']}, change matches:"
-            )
+            if not item["is_big_feature"]:
+                f.write(
+                    f"\n\nBreaking data model changes scores: del:{item['matches_rem']} + add:{item['matches_add']}, change matches:"
+                )
             for match in item["matches"]:
                 f.write("\n" + match)
             f.write(f"\n\nTotal Changes: {item['total_changes']}")
