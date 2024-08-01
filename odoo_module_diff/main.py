@@ -246,24 +246,18 @@ def scan_commit(path: str, commit: git.Commit):
             # line, prev_line and prev_prev_line is a kind of 3 lines scanning buffer
             prev_line = ""
             prev_prev_line = ""
-            is_abstract_model = False
+            is_transient_model = False
 
             for line in diff_item_string.splitlines():
                 line = line.split(" #")[0].strip().replace("\t", " ")
                 reset_scanning_buffer = False
-                if line.startswith("@@ "):
-                    if "AbstractModel" in line:
-                        is_abstract_model = True
+                if line.startswith("@@ ") or line[1:].startswith("class "):
+                    if "TransienModel" in line:
+                        is_transient_model = True
                     else:
-                        is_abstract_model = False
+                        is_transient_model = False
 
-                elif line[1:].startswith("class "):
-                    if "AbstractModel" in line:
-                        is_abstract_model = True
-                    else:
-                        is_abstract_model = False
-
-                if is_abstract_model:
+                if is_transient_model:
                     continue
 
                 if line.startswith("-    ") and not line.startswith("-        "):
@@ -551,9 +545,15 @@ def scan(
 ):
     # Initialize local repo object
     repo = git.Repo(repo_path)
+    force_master_target = False
 
     print(f"git checkout {target_serie}.0 ...")
-    repo.git.checkout(f"{target_serie}.0")
+    try: 
+        repo.git.checkout(f"{target_serie}.0")
+    except git.GitCommandError as e:
+        print(f"WARNING! serie {target_serie}.0 not found, assuming master branch instead...")
+        force_master_target = True
+        repo.git.checkout("master")
 
     if addon:
         addons = [addon]
@@ -569,7 +569,10 @@ def scan(
     else:
         # Get the commits for the branches
         print(f"Getting the merge base with previous serie {target_serie - 1}.0 ...")
-        target_serie_commit = repo.commit(f"{target_serie}.0")
+        if force_master_target:
+            target_serie_commit = repo.commit("master")
+        else:
+            target_serie_commit = repo.commit(f"{target_serie}.0")
         prev_serie_commit = repo.commit(f"{target_serie - 1}.0")
         merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
         start_commit = merge_base[0]
