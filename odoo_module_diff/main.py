@@ -11,8 +11,8 @@ import typer
 from slugify import slugify
 
 LINE_CHANGE_THRESHOLD = 25
-LINE_CHANGE_FEAT_THRESHOLD = 200
-LINE_MESSAGE_FEAT_THRESHOLD = 45
+LINE_CHANGE_FEAT_THRESHOLD = 140
+LINE_MESSAGE_FEAT_THRESHOLD = 40
 NON_TRIVIAL_FIELD_ATTRS = (
     "company_dependent=",
     "store=",
@@ -56,9 +56,9 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
 
 def scan_diff_line_removal(
     line: str,
-    matches_add: float,
-    matches_rem: float,
-    matches_feat: float,
+    score_add: float,
+    score_del: float,
+    score_feat: float,
     matches: List[str],
     prev_line: str,
     prev_prev_line: str,
@@ -73,7 +73,7 @@ def scan_diff_line_removal(
     ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
         reset_scanning_buffer = True
         matches.append(line)
-        matches_rem += 1
+        score_del += 1
 
     elif (
         " _inherits =" in line
@@ -84,7 +84,7 @@ def scan_diff_line_removal(
     ) and "AbstractModel" not in (line + prev_line + prev_prev_line):
         reset_scanning_buffer = True
         matches.append(line)
-        matches_rem += 1
+        score_del += 1
 
     elif (
         " = fields." in line
@@ -101,17 +101,17 @@ def scan_diff_line_removal(
         reset_scanning_buffer = True
         matches.append(line)
         if " = fields." not in line:
-            matches_rem += 0.4  # wheights less because just an attr change
+            score_del += 0.4  # wheights less because just an important attr change
         else:
-            matches_rem += 1
+            score_del += 1
         if "2many(" in line:  # relations removal weights more
-            matches_rem += 1
+            score_del += 1
 
     return (
         line,
-        matches_add,
-        matches_rem,
-        matches_feat,
+        score_add,
+        score_del,
+        score_feat,
         matches,
         prev_line,
         prev_prev_line,
@@ -121,9 +121,9 @@ def scan_diff_line_removal(
 
 def scan_diff_line_addition(
     line: str,
-    matches_add: float,
-    matches_rem: float,
-    matches_feat: float,
+    score_add: float,
+    score_del: float,
+    score_feat: float,
     matches: List[str],
     prev_line: str,
     prev_prev_line: str,
@@ -143,8 +143,26 @@ def scan_diff_line_addition(
                 continue
 
             if (
-                match[1:].split("(")[0]
-                == line[1:].split("(")[0]  # same field name and type
+                (
+                    match[1:].split("(")[0]
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Char", "fields.Text")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Char", "fields.Html")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Text", "fields.Html")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
+                or (
+                    match[1:].split("(")[0].replace("fields.Integer", "fields.Float")
+                    == line[1:].split("(")[0]  # same field name and type
+                )
             ):
                 removed_match = match
                 break
@@ -174,36 +192,32 @@ def scan_diff_line_addition(
                     non_trivial_line.add(f"{key}{value}")
 
             if non_trivial_prev == non_trivial_line:
-                # print(
-                #    "  NOT COUNTING trivial field change:",
-                # )
-                # print("  " + removed_match)
-                # print("  " + line)
-                matches_rem -= 1  # cancel our previous match
+                # som unimportant attr change, let's revert the removal score
+                score_del -= 1  # cancel our previous match
                 if "2many(" in line:  # relations removal weights more
-                    matches_rem -= 1
+                    score_del -= 1
 
                 matches.remove(removed_match)
             else:
-                matches_rem -= 0.6  # field isn't removed but some attr changed
-                if "2many(" in line:  # relations removal weights more
-                    matches_rem -= 1
+                score_del -= 0.6  # field isn't removed but some important attr changed
+                if "2many(" in line:  # revert relations removal score
+                    score_del -= 1
                 matches.append(line)  # we help diff visualization
 
         else:
+            # it's really a new field addition
+            score_feat += 1
             if "2many(" in line:  # adding relations weights more
-                matches_add += 1
+                score_add += 1
                 matches.append(line)
-            else:  # non relational field addition give no migration work
-                matches_feat += 1
     else:
-        matches_add += 0.2  # weights less because only a trivial attr additive change
+        score_add += 0.4  # weights less because only an attr additive change
 
     return (
         line,
-        matches_add,
-        matches_rem,
-        matches_feat,
+        score_add,
+        score_del,
+        score_feat,
         matches,
         prev_line,
         prev_prev_line,
@@ -217,9 +231,9 @@ def scan_commit(path: str, commit: git.Commit):
     We count a " = fields." match only
     if it's inside a -/+ line or in the 2 lines before.
     """
-    matches_rem = 0
-    matches_add = 0
-    matches_feat = 0
+    score_del = 0
+    score_add = 0
+    score_feat = 0
     matches = []
     diff_items = []
     for parent in commit.parents:
@@ -232,26 +246,35 @@ def scan_commit(path: str, commit: git.Commit):
             # line, prev_line and prev_prev_line is a kind of 3 lines scanning buffer
             prev_line = ""
             prev_prev_line = ""
+            is_transient_model = False
 
             for line in diff_item_string.splitlines():
                 line = line.split(" #")[0].strip().replace("\t", " ")
                 reset_scanning_buffer = False
+                if line.startswith("@@ ") or line[1:].startswith("class "):
+                    if "TransienModel" in line:
+                        is_transient_model = True
+                    else:
+                        is_transient_model = False
+
+                if is_transient_model:
+                    continue
 
                 if line.startswith("-    ") and not line.startswith("-        "):
                     (
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
                         reset_scanning_buffer,
                     ) = scan_diff_line_removal(
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
@@ -277,18 +300,18 @@ def scan_commit(path: str, commit: git.Commit):
                 ):
                     (
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
                         reset_scanning_buffer,
                     ) = scan_diff_line_addition(
                         line,
-                        matches_add,
-                        matches_rem,
-                        matches_feat,
+                        score_add,
+                        score_del,
+                        score_feat,
                         matches,
                         prev_line,
                         prev_prev_line,
@@ -301,10 +324,10 @@ def scan_commit(path: str, commit: git.Commit):
                     prev_prev_line = prev_line
                     prev_line = line
 
-        if matches_rem + matches_add + matches_feat > 0:
+        if score_del + score_add + score_feat > 0:
             diff_items.append(diff_string)
 
-    return diff_items, matches_rem, matches_add, matches_feat, matches
+    return diff_items, score_del, score_add, score_feat, matches
 
 
 def scan_addon_commits(
@@ -369,10 +392,10 @@ def scan_addon_commits(
             is_big_feature = False
             if (
                 # is a change if many structural removals:
-                matches_rem == 1
+                matches_rem >= 1
                 and total_changes > LINE_CHANGE_THRESHOLD
                 and len(message.splitlines()) > 20
-                or matches_rem == 2
+                or matches_rem >= 2
                 and total_changes > LINE_CHANGE_THRESHOLD
                 or matches_rem > 2
                 # is a change if some removals and many additions:
@@ -395,7 +418,7 @@ def scan_addon_commits(
                 print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
                 is_noise = True
 
-            if (
+            elif (
                 is_noise
                 and not "FIX" in summary
                 and total_changes > LINE_CHANGE_FEAT_THRESHOLD
@@ -442,7 +465,7 @@ def scan_addon_commits(
         # print(f"Commit SHA: {item['commit_sha']}")
         print(f"\nTotal Changes: {item['total_changes']}")
         print(
-            f"Non trivial structural Changes: {item['matches_rem'] + item['matches_add']}"
+            f"Non trivial structural Changes: {item['matches_rem']} + {item['matches_add']}"
         )
         print(f"Date: {item['date']}")
         print(f"Summary: {item['summary']}")
@@ -478,9 +501,10 @@ def scan_addon_commits(
             f.write(f"\n\nFrom: {item['commit_sha']}")
             f.write(f"\nFrom: {item['author']}")
             f.write(f"\nDate: {item['date']}")
-            f.write(
-                f"\n\nBreaking data model changes score: {item['matches_rem'] + item['matches_add']}, change matches:"
-            )
+            if not item["is_big_feature"]:
+                f.write(
+                    f"\n\nBreaking data model changes scores: del:{item['matches_rem']} + add:{item['matches_add']}, change matches:"
+                )
             for match in item["matches"]:
                 f.write("\n" + match)
             f.write(f"\n\nTotal Changes: {item['total_changes']}")
@@ -521,9 +545,15 @@ def scan(
 ):
     # Initialize local repo object
     repo = git.Repo(repo_path)
+    force_master_target = False
 
     print(f"git checkout {target_serie}.0 ...")
-    repo.git.checkout(f"{target_serie}.0")
+    try: 
+        repo.git.checkout(f"{target_serie}.0")
+    except git.GitCommandError as e:
+        print(f"WARNING! serie {target_serie}.0 not found, assuming master branch instead...")
+        force_master_target = True
+        repo.git.checkout("master")
 
     if addon:
         addons = [addon]
@@ -539,7 +569,10 @@ def scan(
     else:
         # Get the commits for the branches
         print(f"Getting the merge base with previous serie {target_serie - 1}.0 ...")
-        target_serie_commit = repo.commit(f"{target_serie}.0")
+        if force_master_target:
+            target_serie_commit = repo.commit("master")
+        else:
+            target_serie_commit = repo.commit(f"{target_serie}.0")
         prev_serie_commit = repo.commit(f"{target_serie - 1}.0")
         merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
         start_commit = merge_base[0]
