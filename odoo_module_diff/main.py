@@ -420,12 +420,12 @@ def scan_addon_commits(
 
             elif (
                 is_noise
-                and not "FIX" in summary
+                and "FIX" not in summary
                 and total_changes > LINE_CHANGE_FEAT_THRESHOLD
                 and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
             ) or (
                 is_noise
-                and not "FIX" in summary
+                and "FIX" not in summary
                 and matches_add + matches_feat > 5
                 and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
             ):
@@ -678,7 +678,7 @@ Together theses commits weight {commits_size}.
 The addons that changed the most are listed below with their relative migration commit sizes:
     """
 
-    with open(f"{output_module_dir}/README.md", "w") as f:
+    with open(f"{output_dir}/README.md", "w") as f:
         f.write(readme)
 
 
@@ -711,4 +711,4 @@ def main(
 
 
 if __name__ == "__main__":
-    app().run(main)
+    app()
