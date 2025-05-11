@@ -22,6 +22,11 @@ NON_TRIVIAL_FIELD_ATTRS = (
 )
 ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 
+BLACKLISTS = [
+    "adapt model class names to correspond to model names",
+    "Restore the model `_name`",
+]
+
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     """
@@ -432,6 +437,11 @@ def scan_addon_commits(
                 is_noise = False
                 is_big_feature = True
 
+            for blacklist in BLACKLISTS:
+                if blacklist in message:
+                    is_noise = True
+                    break
+
             # you may switch this test off to fine tune the is_noise computation
             if is_noise and not keep_noise:
                 continue
@@ -548,10 +558,12 @@ def scan(
     force_master_target = False
 
     print(f"git checkout {target_serie}.0 ...")
-    try: 
+    try:
         repo.git.checkout(f"{target_serie}.0")
     except git.GitCommandError as e:
-        print(f"WARNING! serie {target_serie}.0 not found, assuming master branch instead...")
+        print(
+            f"WARNING! serie {target_serie}.0 not found, assuming master branch instead..."
+        )
         force_master_target = True
         repo.git.checkout("master")
 
