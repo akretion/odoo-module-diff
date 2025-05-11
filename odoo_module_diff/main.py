@@ -22,6 +22,11 @@ NON_TRIVIAL_FIELD_ATTRS = (
 )
 ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 
+BLACKLISTS = [
+    "adapt model class names to correspond to model names",
+    "Restore the model `_name`",
+]
+
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
     """
@@ -420,17 +425,22 @@ def scan_addon_commits(
 
             elif (
                 is_noise
-                and not "FIX" in summary
+                and "FIX" not in summary
                 and total_changes > LINE_CHANGE_FEAT_THRESHOLD
                 and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
             ) or (
                 is_noise
-                and not "FIX" in summary
+                and "FIX" not in summary
                 and matches_add + matches_feat > 5
                 and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
             ):
                 is_noise = False
                 is_big_feature = True
+
+            for blacklist in BLACKLISTS:
+                if blacklist in message:
+                    is_noise = True
+                    break
 
             # you may switch this test off to fine tune the is_noise computation
             if is_noise and not keep_noise:
@@ -548,10 +558,12 @@ def scan(
     force_master_target = False
 
     print(f"git checkout {target_serie}.0 ...")
-    try: 
+    try:
         repo.git.checkout(f"{target_serie}.0")
     except git.GitCommandError as e:
-        print(f"WARNING! serie {target_serie}.0 not found, assuming master branch instead...")
+        print(
+            f"WARNING! serie {target_serie}.0 not found, assuming master branch instead..."
+        )
         force_master_target = True
         repo.git.checkout("master")
 
@@ -678,7 +690,7 @@ Together theses commits weight {commits_size}.
 The addons that changed the most are listed below with their relative migration commit sizes:
     """
 
-    with open(f"{output_module_dir}/README.md", "w") as f:
+    with open(f"{output_dir}/README.md", "w") as f:
         f.write(readme)
 
 
@@ -711,4 +723,4 @@ def main(
 
 
 if __name__ == "__main__":
-    app().run(main)
+    app()
