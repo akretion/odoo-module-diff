@@ -56,18 +56,61 @@ def format_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     return f"def {node.name}({arg_list_str})"
 
 
+def extract_model_identifier(class_node: ast.ClassDef) -> str:
+    """Extracts _name or _inherit string from an AST ClassDef node, falling back to class_node.name."""
+    model_name = None
+    inherit_name = None
+
+    for stmt in class_node.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    if target.id == "_name":
+                        if isinstance(stmt.value, ast.Constant) and isinstance(
+                            stmt.value.value, str
+                        ):
+                            model_name = stmt.value.value
+                        elif isinstance(stmt.value, ast.Str):
+                            model_name = stmt.value.s
+                    elif target.id == "_inherit":
+                        if isinstance(stmt.value, ast.Constant) and isinstance(
+                            stmt.value.value, str
+                        ):
+                            inherit_name = stmt.value.value
+                        elif isinstance(stmt.value, ast.Str):
+                            inherit_name = stmt.value.s
+                        elif (
+                            isinstance(stmt.value, (ast.List, ast.Tuple))
+                            and stmt.value.elts
+                        ):
+                            first = stmt.value.elts[0]
+                            if isinstance(first, ast.Constant) and isinstance(
+                                first.value, str
+                            ):
+                                inherit_name = first.value
+                            elif isinstance(first, ast.Str):
+                                inherit_name = first.s
+
+    if model_name:
+        return model_name
+    if inherit_name:
+        return inherit_name
+    return class_node.name
+
+
 class MethodVisitor(ast.NodeVisitor):
     def __init__(self):
-        self.classes: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        self.current_class: Optional[str] = None
+        self.models: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.current_model: Optional[str] = None
 
     def visit_ClassDef(self, node: ast.ClassDef):
-        prev_class = self.current_class
-        self.current_class = node.name
-        if node.name not in self.classes:
-            self.classes[node.name] = {}
+        prev_model = self.current_model
+        model_id = extract_model_identifier(node)
+        self.current_model = model_id
+        if model_id not in self.models:
+            self.models[model_id] = {}
         self.generic_visit(node)
-        self.current_class = prev_class
+        self.current_model = prev_model
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         self._handle_func(node)
@@ -76,8 +119,8 @@ class MethodVisitor(ast.NodeVisitor):
         self._handle_func(node)
 
     def _handle_func(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
-        if self.current_class:
-            self.classes[self.current_class][node.name] = {
+        if self.current_model:
+            self.models[self.current_model][node.name] = {
                 "sig": format_signature(node),
                 "lineno": node.lineno,
             }
@@ -86,7 +129,7 @@ class MethodVisitor(ast.NodeVisitor):
 def extract_methods_from_commit(
     commit: git.Commit, addon: str
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Extract all method signatures across all python model files in an addon at a specific commit."""
+    """Extract all method signatures across all python model files in an addon at a specific commit, grouped by Odoo model ID."""
     path = f"addons/{addon}/models" if addon != "base" else "odoo/addons/base/models"
     try:
         tree = commit.tree
@@ -96,19 +139,19 @@ def extract_methods_from_commit(
         return {}
 
     blobs = get_py_blobs(tree)
-    classes: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    models: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for filepath, code in blobs.items():
         try:
             parsed = ast.parse(code)
             visitor = MethodVisitor()
             visitor.visit(parsed)
-            for cls, methods in visitor.classes.items():
-                if cls not in classes:
-                    classes[cls] = {}
-                classes[cls].update(methods)
+            for model_id, methods in visitor.models.items():
+                if model_id not in models:
+                    models[model_id] = {}
+                models[model_id].update(methods)
         except Exception:
             pass
-    return classes
+    return models
 
 
 def build_commit_map_from_repo(
@@ -162,21 +205,22 @@ def generate_method_signatures_diff(
 ):
     """
     Generates method_signatures.patch for the given addon between start_commit and end_commit.
+    Methods are grouped by Odoo model ID (_name / _inherit).
     Move-invariant: methods moved without signature change are ignored.
     """
     print(f"Extracting method signatures for {addon} at start/end commits...")
     methods_start = extract_methods_from_commit(start_commit, addon)
     methods_end = extract_methods_from_commit(end_commit, addon)
 
-    all_classes = sorted(set(methods_start.keys()) | set(methods_end.keys()))
+    all_models = sorted(set(methods_start.keys()) | set(methods_end.keys()))
     diff_data = {}
     total_added = 0
     total_removed = 0
     total_changed = 0
 
-    for cls in all_classes:
-        m_start = methods_start.get(cls, {})
-        m_end = methods_end.get(cls, {})
+    for model_id in all_models:
+        m_start = methods_start.get(model_id, {})
+        m_end = methods_end.get(model_id, {})
 
         added = []
         removed = []
@@ -194,7 +238,7 @@ def generate_method_signatures_diff(
                 changed.append((m, s["sig"], e["sig"]))
 
         if added or removed or changed:
-            diff_data[cls] = {
+            diff_data[model_id] = {
                 "added": added,
                 "removed": removed,
                 "changed": changed,
@@ -219,8 +263,8 @@ def generate_method_signatures_diff(
             f"# Summary: {total_changed} modified, {total_added} added, {total_removed} removed\n\n"
         )
 
-        for cls, data in diff_data.items():
-            f.write(f"[{cls}]\n")
+        for model_id, data in diff_data.items():
+            f.write(f"[{model_id}]\n")
             for mname, orig_sig, new_sig in data["changed"]:
                 cmts = commit_map.get(mname, [])
                 for cmt in cmts:
