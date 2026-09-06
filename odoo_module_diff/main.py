@@ -28,10 +28,12 @@ BLACKLISTS = [
 ]
 
 
-def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
+def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
     """
     Find the most recent commit with a specific message.
     Return the more recent commit if no match is found.
+    The commit search is done in the given rev (serie branch or master)
+    instead of HEAD so no checkout is required (worktrees friendly).
     """
     if target_serie == 16:
         message = "[REL] 16.0 FINAL"
@@ -46,7 +48,7 @@ def find_end_commit_by_serie(repo: git.Repo, target_serie: int):
         message = f"[REL] {target_serie}.0"
 
     last_commit = None
-    for commit in repo.iter_commits():
+    for commit in repo.iter_commits(rev):
         if last_commit is None:
             last_commit = commit
         if (
@@ -544,6 +546,25 @@ def list_addons(repo_path: str, excludes: List[str]):
     return subdirectories
 
 
+def find_worktree_by_branch(repo: git.Repo, branch: str):
+    """Return the path of the worktree that has the given branch checked
+    out, or None. Parses `git worktree list --porcelain` (GitPython has no
+    worktree API). Works from any linked worktree or from the shared repo.
+    """
+    porcelain = repo.git.worktree("list", "--porcelain")
+    for block in porcelain.split("\n\n"):
+        lines = block.splitlines()
+        if not lines or not lines[0].startswith("worktree "):
+            continue
+        for line in lines[1:]:
+            if line.startswith("branch "):
+                checked = line[len("branch refs/heads/"):]
+                if checked == branch:
+                    return lines[0][len("worktree "):]
+                break
+    return None
+
+
 def scan(
     repo_path: str,
     target_serie: int,
@@ -553,25 +574,45 @@ def scan(
     keep_noise: bool = False,
     commit: str = "",
 ):
-    # Initialize local repo object
-    repo = git.Repo(repo_path)
-    force_master_target = False
+    # Initialize local repo object.
+    # In the shared repo + worktrees layout (~/DEV/odoo.git + per serie
+    # worktrees) a git checkout is impossible: each serie branch is already
+    # checked out in its own worktree (or the shared repo would be bare).
+    # So we never checkout anything: revs are resolved repo wide and the
+    # worktree paths are only used for filesystem lookups (addons listing).
+    repo = git.Repo(repo_path, search_parent_directories=True)
+    target_rev = f"{target_serie}.0"
+    prev_rev = f"{target_serie - 1}.0"
 
-    print(f"git checkout {target_serie}.0 ...")
+    print(f"Resolving rev {target_rev} ...")
     try:
-        repo.git.checkout(f"{target_serie}.0")
-    except git.GitCommandError as e:
+        repo.commit(target_rev)
+    except git.BadName:
         print(
-            f"WARNING! serie {target_serie}.0 not found, assuming master branch instead..."
+            f"WARNING! serie {target_rev} not found, assuming master branch instead..."
         )
-        force_master_target = True
-        repo.git.checkout("master")
+        target_rev = "master"
+        repo.commit(target_rev)  # fail early if master is missing too
+
+    # filesystem dir to list the addons from: prefer the worktree that has
+    # the target branch checked out, else the repo main worktree if any
+    fs_dir = None if repo.bare else Path(repo.working_tree_dir)
+    worktree_dir = find_worktree_by_branch(repo, target_rev)
+    if worktree_dir:
+        fs_dir = worktree_dir
+    if not addon and not fs_dir:
+        print(
+            "Error! Cannot find a worktree to list the addons from. "
+            "Pass a specific --addon or add the serie worktree first: "
+            "`git worktree add ~/DEV/odoo<serie>/odoo/src origin/<serie>.0`"
+        )
+        exit(1)
 
     if addon:
         addons = [addon]
     else:
         addons = list_addons(
-            repo_path,
+            str(fs_dir),
             excludes=ADDON_PREFIX_FILTER,
         )
     print(f"Will scan {len(addons)} addons. (applied filter {ADDON_PREFIX_FILTER})")
@@ -580,13 +621,15 @@ def scan(
         start_commit = repo.commit(commit).parents[0]
     else:
         # Get the commits for the branches
-        print(f"Getting the merge base with previous serie {target_serie - 1}.0 ...")
-        if force_master_target:
-            target_serie_commit = repo.commit("master")
-        else:
-            target_serie_commit = repo.commit(f"{target_serie}.0")
-        prev_serie_commit = repo.commit(f"{target_serie - 1}.0")
+        print(f"Getting the merge base with previous serie {prev_rev} ...")
+        target_serie_commit = repo.commit(target_rev)
+        prev_serie_commit = repo.commit(prev_rev)
         merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
+        if not merge_base:
+            print("Error! No merge base found between " f"{target_rev} and {prev_rev}!")
+            print("Likely a shallow or partial clone (depth 1). Run in the repo:")
+            print("  git fetch --unshallow origin")
+            exit(1)
         start_commit = merge_base[0]
 
     start_date = datetime.fromtimestamp(start_commit.committed_date).strftime(
@@ -601,7 +644,9 @@ def scan(
         end_found = True
     else:
         # Find the end commit
-        end_commit, end_found = find_end_commit_by_serie(repo, target_serie)
+        end_commit, end_found = find_end_commit_by_serie(
+            repo, target_serie, target_rev
+        )
         end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -623,9 +668,11 @@ def scan(
         )
         exit(1)
 
-    if end_found:
+    if end_found and target_rev != "master":
         serie = f"{target_serie}.0"
     else:
+        # unreleased serie (master) or release commit not found:
+        # manifestoo only knows released series, use the previous serie
         serie = f"{target_serie - 1}.0"
 
     for addon in addons:
@@ -641,7 +688,7 @@ def scan(
                 [
                     "manifestoo",
                     "--addons-path",
-                    "odoo/src/addons",
+                    str(Path(fs_dir) / "addons"),
                     f"--odoo-series={serie}",
                     "--select",
                     addon,
@@ -650,6 +697,11 @@ def scan(
                 capture_output=True,
                 text=True,
             )
+            if result.returncode != 0:
+                print(
+                    "WARNING! manifestoo failed, dependencies.txt will be"
+                    f" empty: {result.stderr.strip().splitlines()[-1:]}"
+                )
             manifestoo_output = result.stdout
             with open(f"{output_module_dir}/dependencies.txt", "w") as f:
                 f.write(manifestoo_output)

@@ -33,8 +33,47 @@ pip install .
 ## Usage
 
 ```console
-python odoo_module_diff/main.py <path_to_odoo_repo> 17
+python odoo_module_diff/main.py <path_to_odoo_repo> <target_serie>
 ```
+
+or once installed:
+
+```console
+odoo-module-diff <path_to_odoo_repo> <target_serie> [--addon <addon>]
+```
+
+Useful options:
+
+* `--addon <addon>`: scan a single addon instead of all of them.
+* `--output-dir <dir>`: where to write the analysis files (default `module_diff_analysis/<serie>.0`).
+* `--commit <sha>`: only analyse a single commit (and its diff from its first parent) instead of the whole serie range.
+* `--dump-dependencies`: also write a manifestoo dependency tree per addon.
+* `--keep-noise`: keep the commits detected as noise (grey results) too.
+
+The tool compares the target serie against the previous one (e.g. serie `19`
+compares the merge base of `19.0` up to the `[REL] 19.0` release commit).
+
+### Analysing an unreleased serie (master)
+
+To analyse what will become the next serie (e.g. 20.0 while only the `master`
+branch exists), just pass the future serie number: if the `<serie>.0` branch
+does not exist, the `master` branch is used instead, and the scan then covers
+the merge base between the previous serie branch and master up to the current
+master tip. The serie label falls back to the previous serie for tools
+depending on released series (such as manifestoo).
+
+### Shared repository + worktrees layout
+
+If your Odoo clones are git worktrees of a shared repository (e.g. a bare
+`~/DEV/odoo.git` with one worktree per serie such as `~/DEV/odoo19/odoo/src`
+checked out on `19.0`), the tool detects it: it never performs any `git
+checkout`, so you can pass indifferently the shared repository path or any of
+the worktree paths as `<path_to_odoo_repo>`, even while the serie branches are
+checked out in the other worktrees. The worktree of the target serie (or of
+master for an unreleased serie) is only used to list the addons on the
+filesystem. Note that the shared repository must not be a shallow clone
+(otherwise there is no merge base between the branches: run `git fetch
+--unshallow origin` in it once).
 
 ## Example
 
