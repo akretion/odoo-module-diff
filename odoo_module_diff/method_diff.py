@@ -111,26 +111,44 @@ def extract_methods_from_commit(
     return classes
 
 
-def build_commit_map_from_items(commit_items: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Build index of method_name -> comment_line from scanned structural commit items."""
-    commit_map = {}
-    for item in commit_items:
-        c_sha = item.get("commit_sha", "")[:10]
-        pr = item.get("pr", "")
-        author = item.get("author", "")
-        summary = item.get("summary", "")
-        comment_line = f"# PR: {pr} | Commit: {c_sha} | {author} | {summary}"
-        for diff_str in item.get("diffs", []):
-            for line in diff_str.splitlines():
-                if (
-                    line.startswith("+    def ")
-                    or line.startswith("-    def ")
-                    or line.startswith("+   def ")
-                    or line.startswith("-   def ")
-                ) and "(" in line:
-                    mname = line.split("def ")[1].split("(")[0].strip()
-                    if mname not in commit_map:
-                        commit_map[mname] = comment_line
+def build_commit_map_from_repo(
+    repo: git.Repo, addon: str, start_commit: git.Commit, end_commit: git.Commit
+) -> Dict[str, List[str]]:
+    """Build index of method_name -> list of comment lines for all commits that touched each method."""
+    path = f"addons/{addon}/models/" if addon != "base" else "odoo/addons/base/models/"
+    commits = list(
+        repo.iter_commits(f"{start_commit.hexsha}..{end_commit.hexsha}", paths=path)
+    )
+    commit_map: Dict[str, List[str]] = {}
+    for c in reversed(commits):  # Chronological order
+        pr = ""
+        for line in c.message.splitlines():
+            if " odoo/odoo#" in line:
+                pr = f"https://github.com/odoo/odoo/pull/{line.split(' odoo/odoo#')[1].strip()}"
+        c_sha = c.hexsha[:10]
+        author = c.author.name
+        summary = c.message.splitlines()[0]
+        comment_line = f"# Commit: {c_sha} | PR: {pr} | {author} | {summary}"
+
+        for parent in c.parents:
+            try:
+                diffs = parent.diff(c, paths=path, create_patch=True)
+                for d in diffs:
+                    patch_str = d.diff.decode("utf-8", errors="ignore")
+                    for line in patch_str.splitlines():
+                        if (
+                            line.startswith("+    def ")
+                            or line.startswith("-    def ")
+                            or line.startswith("+   def ")
+                            or line.startswith("-   def ")
+                        ) and "(" in line:
+                            mname = line.split("def ")[1].split("(")[0].strip()
+                            if mname not in commit_map:
+                                commit_map[mname] = []
+                            if comment_line not in commit_map[mname]:
+                                commit_map[mname].append(comment_line)
+            except Exception:
+                pass
     return commit_map
 
 
@@ -143,7 +161,7 @@ def generate_method_signatures_diff(
     commit_items: Optional[List[Dict[str, Any]]] = None,
 ):
     """
-    Generates method_signatures.diff for the given addon between start_commit and end_commit.
+    Generates method_signatures.patch for the given addon between start_commit and end_commit.
     Move-invariant: methods moved without signature change are ignored.
     """
     print(f"Extracting method signatures for {addon} at start/end commits...")
@@ -189,12 +207,11 @@ def generate_method_signatures_diff(
         print(f"No method signature changes found for addon {addon}.")
         return
 
-    commit_map = {}
-    if commit_items:
-        commit_map = build_commit_map_from_items(commit_items)
+    print(f"Mapping commit SHAs for changed methods in {addon}...")
+    commit_map = build_commit_map_from_repo(repo, addon, start_commit, end_commit)
 
     os.makedirs(output_module_dir, exist_ok=True)
-    out_filepath = os.path.join(output_module_dir, "method_signatures.diff")
+    out_filepath = os.path.join(output_module_dir, "method_signatures.patch")
 
     with open(out_filepath, "w") as f:
         f.write(f"# Method Signatures Delta: {addon}\n")
@@ -205,21 +222,21 @@ def generate_method_signatures_diff(
         for cls, data in diff_data.items():
             f.write(f"[{cls}]\n")
             for mname, orig_sig, new_sig in data["changed"]:
-                cmt = commit_map.get(mname, "")
-                if cmt:
+                cmts = commit_map.get(mname, [])
+                for cmt in cmts:
                     f.write(f"{cmt}\n")
                 f.write(f"- {orig_sig}\n")
                 f.write(f"+ {new_sig}\n\n")
 
             for mname, sig in data["removed"]:
-                cmt = commit_map.get(mname, "")
-                if cmt:
+                cmts = commit_map.get(mname, [])
+                for cmt in cmts:
                     f.write(f"{cmt}\n")
                 f.write(f"- {sig}\n\n")
 
             for mname, sig in data["added"]:
-                cmt = commit_map.get(mname, "")
-                if cmt:
+                cmts = commit_map.get(mname, [])
+                for cmt in cmts:
                     f.write(f"{cmt}\n")
                 f.write(f"+ {sig}\n\n")
 
