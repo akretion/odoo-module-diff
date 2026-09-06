@@ -49,6 +49,48 @@ Useful options:
 * `--commit <sha>`: only analyse a single commit (and its diff from its first parent) instead of the whole serie range.
 * `--dump-dependencies`: also write a manifestoo dependency tree per addon.
 * `--keep-noise`: keep the commits detected as noise (grey results) too.
+* `--dump-context`: after the scan, aggregate all the pseudo patch files of
+  the target addon (or of every scanned addon) into a single
+  `migration_context.md` file next to the analysis files: a ready-to-use
+  migration context for AI agents (see the odoo-migration skill,
+  investigation step 2).
+* `--from-analysis <dir>`: aggregate existing analysis files (e.g. from
+  [odoo-module-diff-analysis](https://github.com/akretion/odoo-module-diff-analysis)
+  or a previous run) without scanning git at all. Combine with `--addon`,
+  `--output-file`, `--stdout` and `--max-bytes`. The serie is inferred from
+  the directory name (`.../19.0/`) or passed positionally.
+* `--with-dependencies`: with `--addon`, resolve the transitive dependencies
+  with manifestoo and aggregate them first, in topological (migration) order:
+  core addons come from the analysis files (missing ones are marked
+  `[MISSING]`), while OCA/external dependencies are not scanned yet (they
+  will appear as `[MISSING]` placeholders). The addons-path is auto-detected
+  from `$ODOO_PARENT_HOME/odoo<serie>/odoo/` (core `src/addons`,
+  `src/odoo/addons` and every `external-src/*` repo), from the given repo
+  worktree, or from the matching worktree of a shared repository.
+* `--with-external`: with `--with-dependencies`, additionally scan the
+  external (OCA/custom) addons of the dependency chain on the fly, in their
+  own git repositories (e.g. `external-src/l10n-brazil`), instead of
+  reporting them as missing. External addons are located in the
+  `external-src` dirs of the serie environment and scanned with the merge
+  base of the two serie version branches as start boundary; when the target
+  serie branch was recreated with unrelated history (e.g. the OCA 19.0
+  branch recreation), the previous serie branch tip is used instead.
+* `--output-file <path>`: where to write the aggregated context (default:
+  `<analysis_dir>/migration_context.md`).
+* `--stdout`: stream the aggregated context to stdout (logs go to stderr).
+* `--max-bytes <n>`: size budget for the aggregated context; the method
+  signatures patch and the structural patches are included first (noise
+  last) and skipped files are listed at the end of the document.
+
+Examples:
+
+```console
+# aggregate the cached 19.0 analysis of the account addon into one context file
+odoo-module-diff --from-analysis ~/DEV/odoo-module-diff-analysis/19.0 --addon account
+
+# scan the future 20.0 serie and stream a context under 100 KB for an agent prompt
+odoo-module-diff ~/DEV/odoo.git 20 --addon account --dump-context --stdout --max-bytes 100000 > context.md
+```
 
 The tool compares the target serie against the previous one (e.g. serie `19`
 compares the merge base of `19.0` up to the `[REL] 19.0` release commit).

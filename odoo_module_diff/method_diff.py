@@ -1,6 +1,7 @@
 import ast
 import os
 from typing import Any, Dict, List, Optional
+
 import git
 
 
@@ -127,10 +128,15 @@ class MethodVisitor(ast.NodeVisitor):
 
 
 def extract_methods_from_commit(
-    commit: git.Commit, addon: str
+    commit: git.Commit,
+    addon: str,
+    module_prefix: str = "addons/",
 ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Extract all method signatures across all python model files in an addon at a specific commit, grouped by Odoo model ID."""
-    path = f"addons/{addon}/models" if addon != "base" else "odoo/addons/base/models"
+    if addon == "base" and module_prefix == "addons/":
+        path = "odoo/addons/base/models"
+    else:
+        path = f"{module_prefix}{addon}/models"
     try:
         tree = commit.tree
         for part in path.split("/"):
@@ -155,10 +161,17 @@ def extract_methods_from_commit(
 
 
 def build_commit_map_from_repo(
-    repo: git.Repo, addon: str, start_commit: git.Commit, end_commit: git.Commit
+    repo: git.Repo,
+    addon: str,
+    start_commit: git.Commit,
+    end_commit: git.Commit,
+    module_prefix: str = "addons/",
 ) -> Dict[str, List[str]]:
     """Build index of method_name -> list of comment lines for all commits that touched each method."""
-    path = f"addons/{addon}/models/" if addon != "base" else "odoo/addons/base/models/"
+    if addon == "base" and module_prefix == "addons/":
+        path = "odoo/addons/base/models/"
+    else:
+        path = f"{module_prefix}{addon}/models/"
     commits = list(
         repo.iter_commits(f"{start_commit.hexsha}..{end_commit.hexsha}", paths=path)
     )
@@ -202,6 +215,7 @@ def generate_method_signatures_diff(
     end_commit: git.Commit,
     output_module_dir: str,
     commit_items: Optional[List[Dict[str, Any]]] = None,
+    module_prefix: str = "addons/",
 ):
     """
     Generates method_signatures.patch for the given addon between start_commit and end_commit.
@@ -209,8 +223,8 @@ def generate_method_signatures_diff(
     Move-invariant: methods moved without signature change are ignored.
     """
     print(f"Extracting method signatures for {addon} at start/end commits...")
-    methods_start = extract_methods_from_commit(start_commit, addon)
-    methods_end = extract_methods_from_commit(end_commit, addon)
+    methods_start = extract_methods_from_commit(start_commit, addon, module_prefix)
+    methods_end = extract_methods_from_commit(end_commit, addon, module_prefix)
 
     all_models = sorted(set(methods_start.keys()) | set(methods_end.keys()))
     diff_data = {}
@@ -252,7 +266,9 @@ def generate_method_signatures_diff(
         return
 
     print(f"Mapping commit SHAs for changed methods in {addon}...")
-    commit_map = build_commit_map_from_repo(repo, addon, start_commit, end_commit)
+    commit_map = build_commit_map_from_repo(
+        repo, addon, start_commit, end_commit, module_prefix
+    )
 
     os.makedirs(output_module_dir, exist_ok=True)
     out_filepath = os.path.join(output_module_dir, "method_signatures.patch")

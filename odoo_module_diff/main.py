@@ -2,14 +2,21 @@ import math
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import git
 import typer
 from slugify import slugify
 
+from odoo_module_diff.context import dump_context as dump_context_impl
+from odoo_module_diff.dependencies import find_addons_paths, resolve_dependencies
+from odoo_module_diff.external_addons import (
+    find_external_repo,
+    scan_external_addon,
+)
 from odoo_module_diff.method_diff import generate_method_signatures_diff
 
 LINE_CHANGE_THRESHOLD = 25
@@ -348,11 +355,12 @@ def scan_addon_commits(
     keep_noise: bool = False,
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
+    module_prefix: str = "addons/",
 ):
-    if addon == "base":
+    if addon == "base" and module_prefix == "addons/":
         module_path = "odoo/addons/base/models/"
     else:
-        module_path = f"addons/{addon}/models/"
+        module_path = f"{module_prefix}{addon}/models/"
 
     # Get the commits between the two found commits
     commits = list(
@@ -541,6 +549,7 @@ def scan_addon_commits(
             end_commit,
             output_module_dir,
             commit_items=result,
+            module_prefix=module_prefix,
         )
 
 
@@ -592,6 +601,7 @@ def scan(
     commit: str = "",
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
+    addons: Optional[List[str]] = None,
 ):
     # Initialize local repo object.
     # In the shared repo + worktrees layout (~/DEV/odoo.git + per serie
@@ -627,13 +637,14 @@ def scan(
         )
         exit(1)
 
-    if addon:
-        addons = [addon]
-    else:
-        addons = list_addons(
-            str(fs_dir),
-            excludes=ADDON_PREFIX_FILTER,
-        )
+    if addons is None:
+        if addon:
+            addons = [addon]
+        else:
+            addons = list_addons(
+                str(fs_dir),
+                excludes=ADDON_PREFIX_FILTER,
+            )
     print(f"Will scan {len(addons)} addons. (applied filter {ADDON_PREFIX_FILTER})")
 
     if commit:
@@ -784,8 +795,12 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    repo_path: str,
-    target_serie: float,
+    repo_path: str = typer.Argument(
+        "", help="Path to the Odoo git repo (shared repo or any worktree)."
+    ),
+    target_serie: float = typer.Argument(
+        0, help="Target serie, e.g. 20 for the 20.0/master serie."
+    ),
     addon: str = "",
     output_dir: str = "module_diff_analysis",
     wrap_serie_dir: bool = True,
@@ -794,21 +809,148 @@ def main(
     commit: str = "",
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
+    from_analysis: str = "",
+    dump_context: bool = False,
+    output_file: str = "",
+    stdout: bool = False,
+    max_bytes: int = 0,
+    with_dependencies: bool = False,
+    with_external: bool = False,
 ):
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if from_analysis and not target_serie:
+        # cache mode: infer the serie from the analysis dir name (e.g. .../19.0/)
+        match = re.fullmatch(r"(\d+)\.0", Path(from_analysis).name)
+        if match:
+            target_serie = int(match.group(1))
+
+    # dependency chain for --with-dependencies (both scan and cache modes)
+    context_addons = None
+    if with_dependencies and addon:
+        if not target_serie:
+            print(
+                "Error! Pass the target serie positionally (e.g. 19) or use"
+                " an analysis directory named like <serie>.0"
+            )
+            exit(1)
+        deps_addons_path = find_addons_paths(target_serie, fs_dir=repo_path or "")
+        context_addons = resolve_dependencies(
+            target_serie, deps_addons_path, addon
+        )
+        if len(context_addons) > 1:
+            print(
+                "Including dependencies in the context: "
+                f"{', '.join(context_addons)}"
+            )
+    elif with_dependencies and not addon:
+        print(
+            "WARNING! --with-dependencies requires --addon, ignoring it.",
+            file=sys.stderr,
+        )
+    elif with_external and addon and context_addons is None:
+        # external addon without deps resolved: still scan/aggregate it alone
+        context_addons = [addon]
+
+    # split the chain into core addons (odoo.git / analysis cache) and
+    # external addons (scanned on the fly in their own repos)
+    external_dirs: dict = {}
+    core_chain = None
+    if with_external and context_addons:
+        core_chain = [
+            chain_addon
+            for chain_addon in context_addons
+            if not find_external_repo(
+                target_serie, chain_addon, fs_dir=repo_path or ""
+            )
+        ]
+
+    if from_analysis:
+        # cache mode: aggregate existing analysis files without any git scan
+        if not target_serie:
+            print(
+                "Error! Pass the target serie positionally (e.g. 19) or use"
+                " an analysis directory named like <serie>.0"
+            )
+            exit(1)
+        if not dump_context:
+            print("Tip: --from-analysis implies --dump-context.", file=sys.stderr)
+        context_dir = from_analysis
+        addon_name = addon
+        # scan the external addons of the chain on the fly (Point D)
+        if with_external and context_addons:
+            print(
+                f"External addons will be scanned into {Path(output_dir).resolve()}"
+            )
+            for chain_addon in context_addons:
+                if chain_addon in (core_chain or []):
+                    continue
+                scan_external_addon(
+                    chain_addon,
+                    target_serie,
+                    output_dir=output_dir,
+                    keep_noise=keep_noise,
+                    dump_methods=dump_methods,
+                    fs_dir=repo_path or "",
+                    addons_dirs=external_dirs,
+                )
+        dump_context_impl(
+            analysis_dir=context_dir,
+            addon=addon_name,
+            addons=context_addons,
+            addons_dirs=external_dirs or None,
+            from_label=f"{target_serie - 1}.0",
+            to_label=f"{target_serie}.0",
+            output_file=output_file,
+            stdout=stdout,
+            max_bytes=max_bytes,
+        )
+        return
+
     if wrap_serie_dir and str(target_serie) not in output_dir:
         output_dir += f"/{target_serie}.0"
+
+    # in with_external mode, external addons of the chain are scanned on the
+    # fly in their own repo, not in odoo.git where they don't exist
+    scan_addons = core_chain
     scan(
         repo_path=repo_path,
         target_serie=target_serie,
-        addon=addon,
+        addon=addon if not scan_addons else "",
         output_dir=output_dir,
         dump_dependencies=dump_dependencies,
         keep_noise=keep_noise,
         commit=commit,
         dump_methods=dump_methods,
         bypass_structural_scan=bypass_structural_scan,
+        addons=scan_addons,
     )
+    if with_external:
+        for chain_addon in context_addons or ([addon] if addon else []):
+            if scan_addons and chain_addon in scan_addons:
+                continue
+            scan_external_addon(
+                chain_addon,
+                target_serie,
+                output_dir=output_dir,
+                keep_noise=keep_noise,
+                dump_methods=dump_methods,
+                fs_dir=repo_path or "",
+                addons_dirs=external_dirs,
+            )
+
+    if dump_context:
+        dump_context_impl(
+            analysis_dir=output_dir,
+            addon=addon,
+            addons=context_addons,
+            addons_dirs=external_dirs or None,
+            from_label=f"{target_serie - 1}.0",
+            to_label=f"{target_serie}.0",
+            output_file=output_file,
+            stdout=stdout,
+            max_bytes=max_bytes,
+        )
 
 
 if __name__ == "__main__":
