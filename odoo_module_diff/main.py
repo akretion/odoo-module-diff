@@ -18,6 +18,7 @@ from odoo_module_diff.external_addons import (
     scan_external_addon,
 )
 from odoo_module_diff.method_diff import generate_method_signatures_diff
+from odoo_module_diff.span import dump_span_context
 
 LINE_CHANGE_THRESHOLD = 25
 LINE_CHANGE_FEAT_THRESHOLD = 140
@@ -591,6 +592,19 @@ def find_worktree_by_branch(repo: git.Repo, branch: str):
     return None
 
 
+def _resolve_rev(repo: git.Repo, rev: str) -> str:
+    """Return the rev form that resolves in this repo: the bare branch
+    name when a local ref exists (worktrees layout), else its
+    origin/ counterpart (shared repo without local serie branches).
+    Raises git.BadName when neither resolves."""
+    try:
+        repo.commit(rev)
+        return rev
+    except git.BadName:
+        repo.commit(f"origin/{rev}")  # raise BadName if really missing
+        return f"origin/{rev}"
+
+
 def scan(
     repo_path: str,
     target_serie: int,
@@ -615,7 +629,7 @@ def scan(
 
     print(f"Resolving rev {target_rev} ...")
     try:
-        repo.commit(target_rev)
+        target_rev = _resolve_rev(repo, target_rev)
     except git.BadName:
         print(
             f"WARNING! serie {target_rev} not found, assuming master branch instead..."
@@ -653,7 +667,7 @@ def scan(
         # Get the commits for the branches
         print(f"Getting the merge base with previous serie {prev_rev} ...")
         target_serie_commit = repo.commit(target_rev)
-        prev_serie_commit = repo.commit(prev_rev)
+        prev_serie_commit = repo.commit(_resolve_rev(repo, prev_rev))
         merge_base = repo.merge_base(target_serie_commit, prev_serie_commit)
         if not merge_base:
             print("Error! No merge base found between " f"{target_rev} and {prev_rev}!")
@@ -755,6 +769,39 @@ def scan(
         )
 
 
+def scan_serie_addon(target_serie: int, addon: str, output_dir: str):
+    """Scan a single core addon for the transition to the given serie,
+    writing into output_dir/<addon>/ (Point E on-demand scan). Uses the
+    default odoo.git shared repo (or the serie worktree) as entry point.
+    Returns True when analysis files were produced or already present."""
+    addon_dir = Path(output_dir) / addon
+    if addon_dir.is_dir() and any(addon_dir.glob("*.patch")):
+        return True
+    repo_path = os.environ.get(
+        "ODOO_MODULE_DIFF_REPO", str(Path.home() / "DEV" / "odoo.git")
+    )
+    scan(
+        repo_path=repo_path,
+        target_serie=target_serie,
+        output_dir=str(output_dir),
+        addon=addon,
+        dump_dependencies=False,
+    )
+    if addon_dir.is_dir() and any(addon_dir.glob("*.patch")):
+        return True
+    # no structural commit kept for this step: still produce the method
+    # signature delta so the step is not rendered as MISSING in spans
+    scan(
+        repo_path=repo_path,
+        target_serie=target_serie,
+        output_dir=str(output_dir),
+        addon=addon,
+        dump_dependencies=False,
+        bypass_structural_scan=True,
+    )
+    return addon_dir.is_dir() and any(addon_dir.glob("*.patch"))
+
+
 def create_serie_readme(target_serie: int, output_dir: str):
     result = subprocess.run(
         ["find", ".", "-type", "f", "-name", "*.patch"],
@@ -816,8 +863,42 @@ def main(
     max_bytes: int = 0,
     with_dependencies: bool = False,
     with_external: bool = False,
+    from_serie: float = 0,
+    to_serie: float = 0,
+    max_bytes_per_step: int = 0,
 ):
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if not target_serie and not (from_analysis or (from_serie and to_serie)):
+        print(
+            "Error! Pass the target serie positionally (e.g. 19), or"
+            " --from-serie/--to-serie, or --from-analysis."
+        )
+        exit(1)
+
+    if (from_serie or to_serie) and addon:
+        # multi-serie span mode (Point E): one context section per serie step
+        if not (from_serie and to_serie) or to_serie <= from_serie:
+            print(
+                "Error! Pass both --from-serie and --to-serie with"
+                " --to-serie greater than --from-serie."
+            )
+            exit(1)
+        analysis_root = from_analysis or os.environ.get(
+            "ODOO_MODULE_DIFF_ANALYSIS",
+            str(Path.home() / "DEV" / "odoo-module-diff-analysis"),
+        )
+        dump_span_context(
+            addon,
+            int(from_serie),
+            int(to_serie),
+            analysis_root,
+            output_file=output_file,
+            stdout=stdout,
+            max_bytes_per_step=max_bytes_per_step,
+            max_bytes=max_bytes,
+        )
+        return
 
     if from_analysis and not target_serie:
         # cache mode: infer the serie from the analysis dir name (e.g. .../19.0/)

@@ -48,19 +48,22 @@ def build_context(
     from_label: str,
     to_label: str,
     max_bytes: int = 0,
+    header: bool = True,
 ) -> str:
     """Build the aggregated markdown context for the given addons."""
-    lines = [
-        "# ODOO MODULE MIGRATION CONTEXT",
-        "",
-        f"- Migration span: {from_label} -> {to_label}",
-        f"- Generated: {datetime.now().isoformat(timespec='seconds')}",
-        "- Source: odoo-module-diff pseudo patches (structural commits,"
-        " method signature deltas, dependency trees)",
-        "",
-        "## Contents",
-        "",
-    ]
+    lines = []
+    if header:
+        lines += [
+            "# ODOO MODULE MIGRATION CONTEXT",
+            "",
+            f"- Migration span: {from_label} -> {to_label}",
+            f"- Generated: {datetime.now().isoformat(timespec='seconds')}",
+            "- Source: odoo-module-diff pseudo patches (structural commits,"
+            " method signature deltas, dependency trees)",
+            "",
+            "## Contents",
+            "",
+        ]
 
     total_bytes = 0
     for addon in addons:

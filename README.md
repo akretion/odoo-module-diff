@@ -75,6 +75,15 @@ Useful options:
   base of the two serie version branches as start boundary; when the target
   serie branch was recreated with unrelated history (e.g. the OCA 19.0
   branch recreation), the previous serie branch tip is used instead.
+* `--from-serie <n> --to-serie <m>`: with `--addon`, build a multi-serie
+  migration context decomposed into one section per serie step (e.g.
+  12.0 -> 18.0 yields the 12->13, 13->14, ..., 17->18 steps). Steps are read
+  from the analysis cache (default `~/DEV/odoo-module-diff-analysis`,
+  override with `--from-analysis <root>` or `$ODOO_MODULE_DIFF_ANALYSIS`);
+  missing serie steps are scanned on demand into the cache using the shared
+  Odoo repository (`$ODOO_MODULE_DIFF_REPO`, default `~/DEV/odoo.git`).
+  `--max-bytes-per-step` bounds each step independently (`--max-bytes`
+  still warns when the whole span exceeds its budget).
 * `--output-file <path>`: where to write the aggregated context (default:
   `<analysis_dir>/migration_context.md`).
 * `--stdout`: stream the aggregated context to stdout (logs go to stderr).

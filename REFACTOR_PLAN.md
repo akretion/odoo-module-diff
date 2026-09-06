@@ -218,6 +218,17 @@ odoo-module-diff ~/DEV/odoo.git 18.0 --addon account --from-serie 12.0 --to-seri
   - `context.py` accepts an `addons_dirs` override so external addon files
     aggregate seamlessly into the single migration context.
 
+- [x] **Phase 3d: `--from-serie`/`--to-serie` multi-serie spans (Chunk 4)** (Implemented)
+  - New `odoo_module_diff/span.py`: decomposes a long span (e.g. 12.0 ->
+    18.0) into one section per serie step, reusing `build_context` per step
+    (method signatures first, heat-ordered patches, noise last).
+  - Steps come from the analysis cache; missing serie steps are scanned on
+    demand via `main.scan_serie_addon` (shared odoo.git, checkout-free) and
+    persisted into the cache, so a span run fills the cache incrementally.
+  - CLI: `--from-serie`, `--to-serie`, `--max-bytes-per-step`;
+    `--from-analysis <root>` or `$ODOO_MODULE_DIFF_ANALYSIS` select the
+    cache root, `$ODOO_MODULE_DIFF_REPO` the Odoo repo entry point.
+
 - [ ] **Phase 1: Package Refactoring**
   - Extract helper modules (`core/git_helper.py`, `core/commit_scanner.py`, `core/method_diff.py`).
   - Maintain `main.py` entrypoint.
