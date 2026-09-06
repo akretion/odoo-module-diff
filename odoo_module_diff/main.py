@@ -10,6 +10,8 @@ import git
 import typer
 from slugify import slugify
 
+from odoo_module_diff.method_diff import generate_method_signatures_diff
+
 LINE_CHANGE_THRESHOLD = 25
 LINE_CHANGE_FEAT_THRESHOLD = 140
 LINE_MESSAGE_FEAT_THRESHOLD = 40
@@ -344,6 +346,8 @@ def scan_addon_commits(
     end_commit: git.Commit,
     output_module_dir: str,
     keep_noise: bool = False,
+    dump_methods: bool = True,
+    bypass_structural_scan: bool = False,
 ):
     if addon == "base":
         module_path = "odoo/addons/base/models/"
@@ -364,109 +368,112 @@ def scan_addon_commits(
 
     result = []
 
-    for commit in commits:
-        message = commit.message.strip()
-        summary = message.splitlines()[0]
-        if "forwardport" in summary.lower().replace(" ", "").replace("-", ""):
-            # such ports may present structural changes in the diff
-            # but we assume they aren't introducing new changes
-            # since previous serie.
-            # such false positives were common before version 13.
-            continue
-
-        if addon == "base":  # logging progress because base can be very slow...
-            print(f"  scanning {commit.hexsha} {summary} ...")
-
-        total_changes = 0
-        for file in commit.stats.files:
-            if str(file).startswith(module_path):
-                total_changes += commit.stats.files[file]["lines"]
-
-        migration_diffs, matches_rem, matches_add, matches_feat, matches = scan_commit(
-            module_path, commit
-        )
-        if matches_rem or matches_add or matches_feat:
-            pr = ""
-            for line in message.splitlines():
-                if " odoo/odoo#" in str(line):
-                    pr = str(line).split(" odoo/odoo#")[1].strip()
-
-            # now some heuristics to keep only relevant commits.
-            # commits removing fields are the most critical to keep.
-            # commits removings or adding just a couple of fields with
-            # a small diff are likely to be trivial and are not kept.
-            is_noise = True
-            is_big_feature = False
-            if (
-                # is a change if many structural removals:
-                matches_rem >= 1
-                and total_changes > LINE_CHANGE_THRESHOLD
-                and len(message.splitlines()) > 20
-                or matches_rem >= 2
-                and total_changes > LINE_CHANGE_THRESHOLD
-                or matches_rem > 2
-                # is a change if some removals and many additions:
-                or matches_rem > 1
-                and matches_add > 3
-                and total_changes > LINE_CHANGE_THRESHOLD
-                # or matches_add > 3
-                # or matches_rem + matches_add > 4
-            ):
-                is_noise = False
-
-            if (
-                not is_noise
-                and matches_rem < 4
-                and matches_rem + matches_add < 5
-                and total_changes < 2 * LINE_CHANGE_THRESHOLD
-                and len(message.splitlines()) < 9
-            ):
-                # medium change without too much removal and very little explanation can be skipped
-                print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
-                is_noise = True
-
-            elif (
-                is_noise
-                and "FIX" not in summary
-                and total_changes > LINE_CHANGE_FEAT_THRESHOLD
-                and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
-            ) or (
-                is_noise
-                and "FIX" not in summary
-                and matches_add + matches_feat > 5
-                and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
-            ):
-                is_noise = False
-                is_big_feature = True
-
-            for blacklist in BLACKLISTS:
-                if blacklist in message:
-                    is_noise = True
-                    break
-
-            # you may switch this test off to fine tune the is_noise computation
-            if is_noise and not keep_noise:
+    if not bypass_structural_scan:
+        for commit in commits:
+            message = commit.message.strip()
+            summary = message.splitlines()[0]
+            if "forwardport" in summary.lower().replace(" ", "").replace("-", ""):
+                # such ports may present structural changes in the diff
+                # but we assume they aren't introducing new changes
+                # since previous serie.
+                # such false positives were common before version 13.
                 continue
 
-            result.append(
-                {
-                    "is_noise": is_noise,
-                    "is_big_feature": is_big_feature,
-                    "commit_sha": commit.hexsha,
-                    "total_changes": int(total_changes),
-                    "author": commit.author.name,
-                    "date": datetime.fromtimestamp(commit.committed_date).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                    "summary": summary,
-                    "message": message,
-                    "pr": f"https://github.com/odoo/odoo/pull/{pr}",
-                    "matches_rem": matches_rem,
-                    "matches_add": matches_add,
-                    "diffs": migration_diffs,
-                    "matches": matches,
-                }
+            if addon == "base":  # logging progress because base can be very slow...
+                print(f"  scanning {commit.hexsha} {summary} ...")
+
+            migration_diffs, matches_rem, matches_add, matches_feat, matches = scan_commit(
+                module_path, commit
             )
+            if matches_rem or matches_add or matches_feat:
+                # only compute the stats of relevant commits (stats is a costly
+                # git subprocess and total_changes is unused otherwise)
+                total_changes = 0
+                for file, stats in commit.stats.files.items():
+                    if str(file).startswith(module_path):
+                        total_changes += stats["lines"]
+
+                pr = ""
+                for line in message.splitlines():
+                    if " odoo/odoo#" in str(line):
+                        pr = str(line).split(" odoo/odoo#")[1].strip()
+
+                # now some heuristics to keep only relevant commits.
+                # commits removing fields are the most critical to keep.
+                # commits removings or adding just a couple of fields with
+                # a small diff are likely to be trivial and are not kept.
+                is_noise = True
+                is_big_feature = False
+                if (
+                    # is a change if many structural removals:
+                    matches_rem >= 1
+                    and total_changes > LINE_CHANGE_THRESHOLD
+                    and len(message.splitlines()) > 20
+                    or matches_rem >= 2
+                    and total_changes > LINE_CHANGE_THRESHOLD
+                    or matches_rem > 2
+                    # is a change if some removals and many additions:
+                    or matches_rem > 1
+                    and matches_add > 3
+                    and total_changes > LINE_CHANGE_THRESHOLD
+                    # or matches_add > 3
+                    # or matches_rem + matches_add > 4
+                ):
+                    is_noise = False
+
+                if (
+                    not is_noise
+                    and matches_rem < 4
+                    and matches_rem + matches_add < 5
+                    and total_changes < 2 * LINE_CHANGE_THRESHOLD
+                    and len(message.splitlines()) < 9
+                ):
+                    # medium change without too much removal and very little explanation can be skipped
+                    print(f"SKIPPING NOISY COMMIT FROM PR {pr}", message)
+                    is_noise = True
+
+                elif (
+                    is_noise
+                    and "FIX" not in summary
+                    and total_changes > LINE_CHANGE_FEAT_THRESHOLD
+                    and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
+                ) or (
+                    is_noise
+                    and "FIX" not in summary
+                    and matches_add + matches_feat > 5
+                    and len(message.splitlines()) > LINE_MESSAGE_FEAT_THRESHOLD
+                ):
+                    is_noise = False
+                    is_big_feature = True
+
+                for blacklist in BLACKLISTS:
+                    if blacklist in message:
+                        is_noise = True
+                        break
+
+                # you may switch this test off to fine tune the is_noise computation
+                if is_noise and not keep_noise:
+                    continue
+
+                result.append(
+                    {
+                        "is_noise": is_noise,
+                        "is_big_feature": is_big_feature,
+                        "commit_sha": commit.hexsha,
+                        "total_changes": int(total_changes),
+                        "author": commit.author.name,
+                        "date": datetime.fromtimestamp(commit.committed_date).strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                        "summary": summary,
+                        "message": message,
+                        "pr": f"https://github.com/odoo/odoo/pull/{pr}",
+                        "matches_rem": matches_rem,
+                        "matches_add": matches_add,
+                        "diffs": migration_diffs,
+                        "matches": matches,
+                    }
+                )
 
     # Output the result
     if result:
@@ -526,6 +533,16 @@ def scan_addon_commits(
                 for diff_item in diffs:
                     f.write(diff_item)
 
+    if dump_methods and (result or bypass_structural_scan):
+        generate_method_signatures_diff(
+            repo,
+            addon,
+            start_commit,
+            end_commit,
+            output_module_dir,
+            commit_items=result,
+        )
+
 
 def list_addons(repo_path: str, excludes: List[str]):
     directory = Path(f"{repo_path}/addons")
@@ -573,6 +590,8 @@ def scan(
     dump_dependencies: bool = False,
     keep_noise: bool = False,
     commit: str = "",
+    dump_methods: bool = True,
+    bypass_structural_scan: bool = False,
 ):
     # Initialize local repo object.
     # In the shared repo + worktrees layout (~/DEV/odoo.git + per serie
@@ -644,9 +663,16 @@ def scan(
         end_found = True
     else:
         # Find the end commit
-        end_commit, end_found = find_end_commit_by_serie(
-            repo, target_serie, target_rev
-        )
+        if target_rev == "master":
+            # unreleased serie: there is no [REL] commit to find and
+            # find_end_commit_by_serie would walk the whole history just to
+            # fallback to the branch tip, so take the tip directly
+            end_commit = repo.commit(target_rev)
+            end_found = False
+        else:
+            end_commit, end_found = find_end_commit_by_serie(
+                repo, target_serie, target_rev
+            )
         end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -707,7 +733,14 @@ def scan(
                 f.write(manifestoo_output)
 
         scan_addon_commits(
-            repo, addon, start_commit, end_commit, output_module_dir, keep_noise
+            repo,
+            addon,
+            start_commit,
+            end_commit,
+            output_module_dir,
+            keep_noise,
+            dump_methods,
+            bypass_structural_scan,
         )
 
 
@@ -759,6 +792,8 @@ def main(
     dump_dependencies: bool = False,
     keep_noise: bool = False,
     commit: str = "",
+    dump_methods: bool = True,
+    bypass_structural_scan: bool = False,
 ):
     target_serie = int(target_serie)  # (float this allows .0)
     if wrap_serie_dir and str(target_serie) not in output_dir:
@@ -771,6 +806,8 @@ def main(
         dump_dependencies=dump_dependencies,
         keep_noise=keep_noise,
         commit=commit,
+        dump_methods=dump_methods,
+        bypass_structural_scan=bypass_structural_scan,
     )
 
 
