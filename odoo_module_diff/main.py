@@ -56,6 +56,11 @@ BLACKLISTED_COMMITS = [
     "e5e4ca6554f5781a620f357eba562ed566222aeb",  # 16.0 sale_quotation_builder: [MOV] split template py (move only)
     "16ee5235e0a5805c65c71bab2c89a4603ed690b8",  # 16.0 hr_skills: [MOV] split model files (move only)
     "753ac6b30a567a3532b4c68c052058e06a93a9a3",  # 16.0 product: clean pricelist item file (reformat only)
+    "74dc9795f5b9c1712bb171e8ca2e965acd832165",  # 15.0 im_livechat: [MOV] split models related to mail (move only)
+    "a81942cf7efc6ec75b0fb1d30e243fc7a5b6f529",  # 15.0 hr_fleet: split model files (reformat only)
+    "11b8735d8a68bfe44ba4c3aaedada85983e1b337",  # 15.0 mail: [MOV] reorganize channel code (move only)
+    "f87a0eb763dc7aa0abe68747d59a302f32e66e8b",  # 15.0 calendar_sms: [REF] prepare alarm config (imports only)
+    "1e9b1da0eb813e268bac261bce748a9d78cba79b",  # 15.0 calendar: [MOV] reorganize event/attendee fields (move only)
 ]
 
 
