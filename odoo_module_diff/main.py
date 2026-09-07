@@ -52,35 +52,61 @@ BLACKLISTS = [
 # when re-scanning (pure file moves/splits or reformatting commits whose
 # structural matches are all quote/whitespace twins or multiline re-wraps)
 BLACKLISTED_COMMITS = [
-    "70b9b7a7722db52061a29343c149bddd12a8dd20",  # 16.0 sale_quotation_builder: split files (reformat only)
-    "e5e4ca6554f5781a620f357eba562ed566222aeb",  # 16.0 sale_quotation_builder: [MOV] split template py (move only)
-    "16ee5235e0a5805c65c71bab2c89a4603ed690b8",  # 16.0 hr_skills: [MOV] split model files (move only)
-    "753ac6b30a567a3532b4c68c052058e06a93a9a3",  # 16.0 product: clean pricelist item file (reformat only)
-    "74dc9795f5b9c1712bb171e8ca2e965acd832165",  # 15.0 im_livechat: [MOV] split models related to mail (move only)
-    "a81942cf7efc6ec75b0fb1d30e243fc7a5b6f529",  # 15.0 hr_fleet: split model files (reformat only)
-    "11b8735d8a68bfe44ba4c3aaedada85983e1b337",  # 15.0 mail: [MOV] reorganize channel code (move only)
-    "f87a0eb763dc7aa0abe68747d59a302f32e66e8b",  # 15.0 calendar_sms: [REF] prepare alarm config (imports only)
-    "1e9b1da0eb813e268bac261bce748a9d78cba79b",  # 15.0 calendar: [MOV] reorganize event/attendee fields (move only)
-    "7076b4f4d0d933d93b24e8e4c7cf21ef0b0008e5",  # 14.0 account: [REF] split big files (move only)
-    "abcd6c15cf27d0e5da77b2e08a742f40e11c4e84",  # 14.0 event[_sale]: [MOV] split main models (move only)
-    "779912007441d005641daadbd8336029950cc7d0",  # 14.0 calendar: [MOV] split models in their own file (move only)
-    "d81d12daaada571fdb184b059ada34221fa70d3d",  # 14.0 stock: [MOV] orderpoint own file (move only)
-    "d160997c9515dd6178da83fcb1daebad0086cb86",  # 14.0 base_address_extended: [MOV] reorganize python code (move only)
-    "b0d22b5752d483da0534dad00b7f35dd11612804",  # 14.0 purchase_mrp: imports-only diff (move only)
-    "2835e0ba38f67f76b7f43948290050dcc68cd9db",  # 14.0 mail: [MOV] move language computation (move only)
-    "72aa04984463db0b15770cbf26fd15dd9c2ccaee",  # 14.0 mail: placeholder mixin fields all survive 14.0 (move only)
-    "aa31e67716f19ad84145ecb35b0cda07e2143b83",  # 14.0 mail: [REF] reorganize template/render mixin (move only)
-    "150095ebc7ef112a03f3e6a4704e06cde6e7c5f0",  # 14.0 sales_team: [IMP] lint module (reformat only)
-    "b2b26f1ff7e4dcf7d0c0ccc36b249045372329c7",  # 13.0 hr: [REF] split hr.py into model files (move only)
-    "7362c6040cd22a0f98277de8fcc004b6ab724a48",  # 13.0 hr_holidays: split hr.py into model files (move only)
-    "f93064606f4b6dd0fde0750991ff517ae2925fac",  # 13.0 hr_skills_slides: fix with class moves only (move only)
-    "37fcb1e6ff371ffbeb81a3825c24a4ed0afbf75f",  # 13.0 link_tracker: [REF] reorganize python (move only)
-    "ad99f09a062cd190c9863d49486e60899daed2a6",  # 13.0 lunch: [REF] split lunch.py into smaller files (move only)
-    "8d2d41068d364f67c4da3eb68eb1f3c95e3c479c",  # 13.0 mail: delete tracking values (non structural, move only)
-    "f5b1105c9752ba5836d24e71f3780a611ec1801f",  # 13.0 mass_mailing: small code fixes + move (move only)
-    "4ba77c52f5d3287e7233eca604f2a086e3f29f7d",  # 13.0 phone_validation: fix MRO issue (move only)
+    # 16.0 sale_quotation_builder: split files (reformat only)
+    "70b9b7a7722db52061a29343c149bddd12a8dd20",
+    # 16.0 sale_quotation_builder: [MOV] split template py (move only)
+    "e5e4ca6554f5781a620f357eba562ed566222aeb",
+    # 16.0 hr_skills: [MOV] split model files (move only)
+    "16ee5235e0a5805c65c71bab2c89a4603ed690b8",
+    # 16.0 product: clean pricelist item file (reformat only)
+    "753ac6b30a567a3532b4c68c052058e06a93a9a3",
+    # 15.0 im_livechat: [MOV] split models related to mail (move only)
+    "74dc9795f5b9c1712bb171e8ca2e965acd832165",
+    # 15.0 hr_fleet: split model files (reformat only)
+    "a81942cf7efc6ec75b0fb1d30e243fc7a5b6f529",
+    # 15.0 mail: [MOV] reorganize channel code (move only)
+    "11b8735d8a68bfe44ba4c3aaedada85983e1b337",
+    # 15.0 calendar_sms: [REF] prepare alarm config (imports only)
+    "f87a0eb763dc7aa0abe68747d59a302f32e66e8b",
+    # 15.0 calendar: [MOV] reorganize event/attendee fields (move only)
+    "1e9b1da0eb813e268bac261bce748a9d78cba79b",
+    # 14.0 account: [REF] split big files (move only)
+    "7076b4f4d0d933d93b24e8e4c7cf21ef0b0008e5",
+    # 14.0 event[_sale]: [MOV] split main models (move only)
+    "abcd6c15cf27d0e5da77b2e08a742f40e11c4e84",
+    # 14.0 calendar: [MOV] split models in their own file (move only)
+    "779912007441d005641daadbd8336029950cc7d0",
+    # 14.0 stock: [MOV] orderpoint own file (move only)
+    "d81d12daaada571fdb184b059ada34221fa70d3d",
+    # 14.0 base_address_extended: [MOV] reorganize python code (move only)
+    "d160997c9515dd6178da83fcb1daebad0086cb86",
+    # 14.0 purchase_mrp: imports-only diff (move only)
+    "b0d22b5752d483da0534dad00b7f35dd11612804",
+    # 14.0 mail: [MOV] move language computation (move only)
+    "2835e0ba38f67f76b7f43948290050dcc68cd9db",
+    # 14.0 mail: placeholder mixin fields all survive 14.0 (move only)
+    "72aa04984463db0b15770cbf26fd15dd9c2ccaee",
+    # 14.0 mail: [REF] reorganize template/render mixin (move only)
+    "aa31e67716f19ad84145ecb35b0cda07e2143b83",
+    # 14.0 sales_team: [IMP] lint module (reformat only)
+    "150095ebc7ef112a03f3e6a4704e06cde6e7c5f0",
+    # 13.0 hr: [REF] split hr.py into model files (move only)
+    "b2b26f1ff7e4dcf7d0c0ccc36b249045372329c7",
+    # 13.0 hr_holidays: split hr.py into model files (move only)
+    "7362c6040cd22a0f98277de8fcc004b6ab724a48",
+    # 13.0 hr_skills_slides: fix with class moves only (move only)
+    "f93064606f4b6dd0fde0750991ff517ae2925fac",
+    # 13.0 link_tracker: [REF] reorganize python (move only)
+    "37fcb1e6ff371ffbeb81a3825c24a4ed0afbf75f",
+    # 13.0 lunch: [REF] split lunch.py into smaller files (move only)
+    "ad99f09a062cd190c9863d49486e60899daed2a6",
+    # 13.0 mail: delete tracking values (non structural, move only)
+    "8d2d41068d364f67c4da3eb68eb1f3c95e3c479c",
+    # 13.0 mass_mailing: small code fixes + move (move only)
+    "f5b1105c9752ba5836d24e71f3780a611ec1801f",
+    # 13.0 phone_validation: fix MRO issue (move only)
+    "4ba77c52f5d3287e7233eca604f2a086e3f29f7d",
 ]
-
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
     """
