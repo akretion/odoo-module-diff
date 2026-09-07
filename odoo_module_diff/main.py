@@ -71,6 +71,14 @@ BLACKLISTED_COMMITS = [
     "72aa04984463db0b15770cbf26fd15dd9c2ccaee",  # 14.0 mail: placeholder mixin fields all survive 14.0 (move only)
     "aa31e67716f19ad84145ecb35b0cda07e2143b83",  # 14.0 mail: [REF] reorganize template/render mixin (move only)
     "150095ebc7ef112a03f3e6a4704e06cde6e7c5f0",  # 14.0 sales_team: [IMP] lint module (reformat only)
+    "b2b26f1ff7e4dcf7d0c0ccc36b249045372329c7",  # 13.0 hr: [REF] split hr.py into model files (move only)
+    "7362c6040cd22a0f98277de8fcc004b6ab724a48",  # 13.0 hr_holidays: split hr.py into model files (move only)
+    "f93064606f4b6dd0fde0750991ff517ae2925fac",  # 13.0 hr_skills_slides: fix with class moves only (move only)
+    "37fcb1e6ff371ffbeb81a3825c24a4ed0afbf75f",  # 13.0 link_tracker: [REF] reorganize python (move only)
+    "ad99f09a062cd190c9863d49486e60899daed2a6",  # 13.0 lunch: [REF] split lunch.py into smaller files (move only)
+    "8d2d41068d364f67c4da3eb68eb1f3c95e3c479c",  # 13.0 mail: delete tracking values (non structural, move only)
+    "f5b1105c9752ba5836d24e71f3780a611ec1801f",  # 13.0 mass_mailing: small code fixes + move (move only)
+    "4ba77c52f5d3287e7233eca604f2a086e3f29f7d",  # 13.0 phone_validation: fix MRO issue (move only)
 ]
 
 
@@ -448,11 +456,17 @@ def scan_addon_commits(
                 # such false positives were common before version 13.
                 continue
 
-            if "[lint]" in summary.lower() or "make black" in summary.lower():
+            summary_lower = summary.lower()
+            if (
+                "[lint]" in summary_lower
+                or "make black" in summary_lower
+                and "blacklist" not in summary_lower
+            ):
                 # mass reformatting commits (double quotes, black, ...)
                 # produce huge quote-only twins that the text heuristic
                 # would count as structural removals: skip them early.
-                # (pure formatting commits never carry a data model change)
+                # (pure formatting commits never carry a data model change;
+                # beware "make blacklist" which is not a black commit!)
                 if addon == "base":
                     print(f"  skipping lint commit {commit.hexsha} {summary} ...")
                 continue
