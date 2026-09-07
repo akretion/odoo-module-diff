@@ -106,6 +106,16 @@ BLACKLISTED_COMMITS = [
     "f5b1105c9752ba5836d24e71f3780a611ec1801f",
     # 13.0 phone_validation: fix MRO issue (move only)
     "4ba77c52f5d3287e7233eca604f2a086e3f29f7d",
+    # 17.0 hr_recruitment_survey: [MOV] split survey models (move only)
+    "a166aafb36b43242e82a5b0a08704684c4ff2c8b",
+    # 17.0 hr_skills_survey: report fields 100% twins (move only)
+    "45ac2970b00b352b86b1fbe6f8b25c15909c6d04",
+    # 17.0 mail: [IMP] lint and reorder alias code (fields survive)
+    "22a6170a01e5818bab57a49606bf385bc2be034d",
+    # 17.0 mail: [REF] lint reorder code bits (fields survive)
+    "c53aae845d91b03ac30c55e14f2e4b4b54d0a39f",
+    # 17.0 purchase_stock: [MOV] separate po/po line (move only)
+    "aabcdd2bc6239fca4037d10c4801739d3697f902",
 ]
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
