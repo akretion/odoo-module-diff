@@ -61,6 +61,16 @@ BLACKLISTED_COMMITS = [
     "11b8735d8a68bfe44ba4c3aaedada85983e1b337",  # 15.0 mail: [MOV] reorganize channel code (move only)
     "f87a0eb763dc7aa0abe68747d59a302f32e66e8b",  # 15.0 calendar_sms: [REF] prepare alarm config (imports only)
     "1e9b1da0eb813e268bac261bce748a9d78cba79b",  # 15.0 calendar: [MOV] reorganize event/attendee fields (move only)
+    "7076b4f4d0d933d93b24e8e4c7cf21ef0b0008e5",  # 14.0 account: [REF] split big files (move only)
+    "abcd6c15cf27d0e5da77b2e08a742f40e11c4e84",  # 14.0 event[_sale]: [MOV] split main models (move only)
+    "779912007441d005641daadbd8336029950cc7d0",  # 14.0 calendar: [MOV] split models in their own file (move only)
+    "d81d12daaada571fdb184b059ada34221fa70d3d",  # 14.0 stock: [MOV] orderpoint own file (move only)
+    "d160997c9515dd6178da83fcb1daebad0086cb86",  # 14.0 base_address_extended: [MOV] reorganize python code (move only)
+    "b0d22b5752d483da0534dad00b7f35dd11612804",  # 14.0 purchase_mrp: imports-only diff (move only)
+    "2835e0ba38f67f76b7f43948290050dcc68cd9db",  # 14.0 mail: [MOV] move language computation (move only)
+    "72aa04984463db0b15770cbf26fd15dd9c2ccaee",  # 14.0 mail: placeholder mixin fields all survive 14.0 (move only)
+    "aa31e67716f19ad84145ecb35b0cda07e2143b83",  # 14.0 mail: [REF] reorganize template/render mixin (move only)
+    "150095ebc7ef112a03f3e6a4704e06cde6e7c5f0",  # 14.0 sales_team: [IMP] lint module (reformat only)
 ]
 
 
