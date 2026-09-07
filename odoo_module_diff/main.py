@@ -116,6 +116,9 @@ BLACKLISTED_COMMITS = [
     "c53aae845d91b03ac30c55e14f2e4b4b54d0a39f",
     # 17.0 purchase_stock: [MOV] separate po/po line (move only)
     "aabcdd2bc6239fca4037d10c4801739d3697f902",
+    # 19.0 base: [IMP] split models res.users and res.groups (move only;
+    # same split happens in other addons but only base had pure twins)
+    "0804aa5566cd65b3470bc5d5d34112ef3ad71ea0",
 ]
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
