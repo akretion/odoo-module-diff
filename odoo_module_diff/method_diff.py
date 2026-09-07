@@ -216,6 +216,7 @@ def generate_method_signatures_diff(
     output_module_dir: str,
     commit_items: Optional[List[Dict[str, Any]]] = None,
     module_prefix: str = "addons/",
+    annotate_commits: bool = True,
 ):
     """
     Generates method_signatures.patch for the given addon between start_commit and end_commit.
@@ -265,10 +266,19 @@ def generate_method_signatures_diff(
         print(f"No method signature changes found for addon {addon}.")
         return
 
-    print(f"Mapping commit SHAs for changed methods in {addon}...")
-    commit_map = build_commit_map_from_repo(
-        repo, addon, start_commit, end_commit, module_prefix
-    )
+    if annotate_commits:
+        # this lookup is the costly part (full patch content of every
+        # commit); it is only worth it when structural commits were kept
+        print(f"Mapping commit SHAs for changed methods in {addon}...")
+        commit_map = build_commit_map_from_repo(
+            repo, addon, start_commit, end_commit, module_prefix
+        )
+    else:
+        print(
+            f"Skipping the commit lookup for {addon}"
+            " (no structural commit kept)."
+        )
+        commit_map = {}
 
     os.makedirs(output_module_dir, exist_ok=True)
     out_filepath = os.path.join(output_module_dir, "method_signatures.patch")
@@ -278,6 +288,11 @@ def generate_method_signatures_diff(
         f.write(
             f"# Summary: {total_changed} modified, {total_added} added, {total_removed} removed\n\n"
         )
+        if not annotate_commits:
+            f.write(
+                "# (commit annotations skipped: no structural commit kept"
+                " in this transition)\n\n"
+            )
 
         for model_id, data in diff_data.items():
             f.write(f"[{model_id}]\n")

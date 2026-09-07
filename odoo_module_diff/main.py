@@ -551,6 +551,10 @@ def scan_addon_commits(
             output_module_dir,
             commit_items=result,
             module_prefix=module_prefix,
+            # the costly per-commit lookup only pays off when some
+            # structural commits were kept: small signature-only changes
+            # get their pseudo patch without commit bookkeeping
+            annotate_commits=bool(result),
         )
 
 
