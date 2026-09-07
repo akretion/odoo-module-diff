@@ -48,6 +48,16 @@ BLACKLISTS = [
     "Restore the model `_name`",
 ]
 
+# commit SHAs blacklisted after post-scan false positive audits: skipped
+# when re-scanning (pure file moves/splits or reformatting commits whose
+# structural matches are all quote/whitespace twins or multiline re-wraps)
+BLACKLISTED_COMMITS = [
+    "70b9b7a7722db52061a29343c149bddd12a8dd20",  # 16.0 sale_quotation_builder: split files (reformat only)
+    "e5e4ca6554f5781a620f357eba562ed566222aeb",  # 16.0 sale_quotation_builder: [MOV] split template py (move only)
+    "16ee5235e0a5805c65c71bab2c89a4603ed690b8",  # 16.0 hr_skills: [MOV] split model files (move only)
+    "753ac6b30a567a3532b4c68c052058e06a93a9a3",  # 16.0 product: clean pricelist item file (reformat only)
+]
+
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
     """
@@ -430,6 +440,10 @@ def scan_addon_commits(
                 # (pure formatting commits never carry a data model change)
                 if addon == "base":
                     print(f"  skipping lint commit {commit.hexsha} {summary} ...")
+                continue
+
+            if commit.hexsha in BLACKLISTED_COMMITS:
+                print(f"SKIPPING blacklisted commit {commit.hexsha[:10]} {summary}")
                 continue
 
             if addon == "base":  # logging progress because base can be very slow...

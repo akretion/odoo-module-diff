@@ -250,6 +250,19 @@ odoo-module-diff ~/DEV/odoo.git 18.0 --addon account --from-serie 12.0 --to-seri
     ~/tmp/lint_patches_backup.tar.gz), remaining files renumbered per
     addon keeping the shared c/feat chronological index (verified
     gapless 0..n-1 in every addon dir).
+  - Same audit on the 16.0 cache (95 patches / 53 addons): no lint
+    commits, but 3 pure move/split FPs removed (sale_quotation_builder
+    x2 split patches with 0 unmatched lines, hr_skills [MOV] with only
+    an __init__ import left) and product c001 reformat-only patch (its
+    10 "removed" fields all survive in 16.0, verified in git). New
+    `BLACKLISTED_COMMITS` SHA list makes rescans skip them. The
+    account res.bank merge patch was kept (genuine model merge).
+  - New FP kind found, not yet fixed: cross-version duplicate commits
+    present on both sides of the fork point both land in the scan range
+    (base jsonb commit: ef00294e71 + 4e82c45abd, same title, del:14
+    each). A dedup on commit title/patch over the serie range would fix
+    it; the commit-id-based branch containment check is unreliable for
+    recreated/rebased serie branches.
 
 - [ ] **Phase 1: Package Refactoring**
   - Extract helper modules (`core/git_helper.py`, `core/commit_scanner.py`, `core/method_diff.py`).
