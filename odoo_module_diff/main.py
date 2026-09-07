@@ -30,6 +30,17 @@ NON_TRIVIAL_FIELD_ATTRS = (
     "recursive=",
     # "inverse=",
 )
+
+
+def _norm_code(line: str) -> str:
+    """Normalize a diff line for twin comparison: strip the -/+ marker,
+    unify quotes and collapse all whitespace. Lint/black reformatting
+    makes twin lines look different while being semantically identical
+    (e.g. _inherit = 'x' -> _inherit = "x")."""
+    body = line[1:] if line[:1] in ("-", "+") else line
+    return re.sub(r"\s+", "", body.replace("'", '"'))
+
+
 ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 
 BLACKLISTS = [
@@ -146,6 +157,30 @@ def scan_diff_line_addition(
     prev_prev_line: str,
     reset_scanning_buffer: bool,
 ):
+    if " _inherit =" in line or " _inherits =" in line:
+        # re-added _inherit/_inherits: cancel a removal twin that only
+        # differs by quotes/whitespace (mass lint reformatting such as
+        # the double-quotes [LINT] commits carry no structural change)
+        norm_line = _norm_code(line)
+        for match in matches:
+            if not match.startswith("-") or " _inherit" not in match:
+                continue
+            if _norm_code(match) == norm_line:
+                matches.remove(match)
+                score_del -= 1  # cancel the removal score of the twin
+                break
+        reset_scanning_buffer = True
+        return (
+            line,
+            score_add,
+            score_del,
+            score_feat,
+            matches,
+            prev_line,
+            prev_prev_line,
+            reset_scanning_buffer,
+        )
+
     if " = fields." in line:
         reset_scanning_buffer = True
 
@@ -188,23 +223,23 @@ def scan_diff_line_addition(
             # new we try to detect trivial field attrs changes:
             non_trivial_prev = set()
             for key in NON_TRIVIAL_FIELD_ATTRS:
-                if key in removed_match:
+                if key in _norm_code(removed_match):
                     if key == "compute=":
                         # we don't want to track the exact compute method
                         value = "some_method"
                     else:
-                        value = removed_match.split(key)[-1]
+                        value = _norm_code(removed_match).split(key)[-1]
                         value = value.split(",")[0].split(")")[0]
                     non_trivial_prev.add(f"{key}{value}")
 
             non_trivial_line = set()
             for key in NON_TRIVIAL_FIELD_ATTRS:
-                if key in line:
+                if key in _norm_code(line):
                     if key == "compute=":
                         # we don't want to track the exact compute method
                         value = "some_method"
                     else:
-                        value = line.split(key)[-1]
+                        value = _norm_code(line).split(key)[-1]
                         value = value.split(",")[0].split(")")[0]
                     non_trivial_line.add(f"{key}{value}")
 
@@ -386,6 +421,15 @@ def scan_addon_commits(
                 # but we assume they aren't introducing new changes
                 # since previous serie.
                 # such false positives were common before version 13.
+                continue
+
+            if "[lint]" in summary.lower() or "make black" in summary.lower():
+                # mass reformatting commits (double quotes, black, ...)
+                # produce huge quote-only twins that the text heuristic
+                # would count as structural removals: skip them early.
+                # (pure formatting commits never carry a data model change)
+                if addon == "base":
+                    print(f"  skipping lint commit {commit.hexsha} {summary} ...")
                 continue
 
             if addon == "base":  # logging progress because base can be very slow...

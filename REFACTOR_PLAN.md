@@ -229,6 +229,28 @@ odoo-module-diff ~/DEV/odoo.git 18.0 --addon account --from-serie 12.0 --to-seri
     `--from-analysis <root>` or `$ODOO_MODULE_DIFF_ANALYSIS` select the
     cache root, `$ODOO_MODULE_DIFF_REPO` the Odoo repo entry point.
 
+- [x] **Phase 4: Structural FP reduction (audit-driven)** (Implemented)
+  - Audit of the 20.0 run (204 patches, 776 del points) found 3 FP
+    families: (1) `[LINT] enforce the use of double-quotes` mass
+    reformatting — 33 patches, ~13% of all del score, 94-100% quote-twins;
+    (2) file moves/splits re-adding removed lines verbatim elsewhere
+    (stock_delivery, hr_holidays, mail); (3) multiline field re-wraps
+    (514 matched lines end with an open bracket). Families 2-3 kept for
+    a later pass (needs statement-level / cross-file twin matching).
+  - Fix 1: skip commits titled `[LINT]`/`make black` early (like the
+    existing `forwardport` skip).
+  - Fix 2: quote/whitespace-normalized comparison (`_norm_code`): field
+    attr trivial-change detection now quote-insensitive, and re-added
+    `_inherit`/`_inherits` lines cancel their removal twin.
+  - Verified: loyalty lint patch (del:5) correctly disappears; stock
+    genuine patches byte-identical scores; unit checks for the twin
+    cancel logic (including the false-cancel guard).
+  - The 20.0 analysis dir was cleaned accordingly without rescanning:
+    33 lint patches deleted by content match (backup in
+    ~/tmp/lint_patches_backup.tar.gz), remaining files renumbered per
+    addon keeping the shared c/feat chronological index (verified
+    gapless 0..n-1 in every addon dir).
+
 - [ ] **Phase 1: Package Refactoring**
   - Extract helper modules (`core/git_helper.py`, `core/commit_scanner.py`, `core/method_diff.py`).
   - Maintain `main.py` entrypoint.
