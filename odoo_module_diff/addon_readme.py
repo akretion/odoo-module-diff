@@ -82,6 +82,18 @@ def html_to_markdown(html: str) -> str:
     html = _strip_tag_by_class(html, "table_of_content")
     html = _strip_tag_by_class(html, "o_header_standard")
     html = _strip_tag_by_class(html, "o_footer")
+    # the odoo.com headings wrap their title in newlines and <font> tags
+    # (<h2>\n <font>Accounting</font>\n</h2>): flatten each heading onto
+    # one line first, else the title lands AFTER a line break and the
+    # markdown shows '## \n Accounting'
+    html = re.sub(
+        r"<h([1-4])([^>]*)>(.*?)</h\1>",
+        lambda m: "<h{0}{1}>{2}</h{0}>".format(
+            m.group(1), m.group(2), re.sub(r"\s+", " ", m.group(3))
+        ),
+        html,
+        flags=re.S,
+    )
     # headings and list items before the generic tag strip
     html = re.sub(r"<h1[^>]*>", "\n\n# ", html)
     html = re.sub(r"<h2[^>]*>", "\n\n## ", html)
