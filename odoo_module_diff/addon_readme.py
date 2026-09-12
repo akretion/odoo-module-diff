@@ -100,6 +100,11 @@ def html_to_markdown(html: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s+\n", "\n\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # the odoo.com page embeds its navigation as long empty "- " bullet
+    # lists before the content: cut everything before the h1 title
+    title = text.find("\n# ")
+    if title >= 0:
+        text = text[title + 1 :]
     return text.strip() + "\n"
 
 
