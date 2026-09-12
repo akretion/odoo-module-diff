@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import re
@@ -120,6 +121,169 @@ BLACKLISTED_COMMITS = [
     # same split happens in other addons but only base had pure twins)
     "0804aa5566cd65b3470bc5d5d34112ef3ad71ea0",
 ]
+
+def latest_patch_index(addon_output_dir: str) -> int:
+    """Highest pseudo patch index (the NNN in cNNN/featNNN/__noiseNNN)
+    already present in the addon analysis dir. Structural and noise
+    patches share one chronological counter, so the max index over all
+    files is the next free slot minus one."""
+    highest = -1
+    path = Path(addon_output_dir)
+    if not path.is_dir():
+        return highest
+    for filepath in path.glob("*.patch"):
+        if filepath.name == "method_signatures.patch":
+            continue
+        match = re.match(r"^(?:c|feat|__noise)(\d{3})", filepath.name)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest
+
+
+def resolve_continue_start(
+    repo: git.Repo,
+    output_dir: str,
+    target_rev: str,
+    end_commit: git.Commit,
+    scan_addons: List[str],
+) -> Optional[git.Commit]:
+    """Resume commit for --continue: the newest kept pseudo commit SHA
+    found in the existing analysis files. Candidates are collected from
+    the `From:` line of every pseudo patch of the addons to scan, then
+    the winner is the candidate that is an ancestor of the serie tip and
+    has the highest topology-agnostic rank (commit date first, then
+    committer order in `git rev-list` as a tie breaker). Commits not
+    reachable from the serie tip (e.g. a stale SHA from a force push)
+    are ignored with a warning. Returns None when there is nothing to
+    continue from."""
+    shas: set = set()
+    for addon in scan_addons:
+        addon_dir = Path(output_dir) / addon
+        if not addon_dir.is_dir():
+            continue
+        for filepath in addon_dir.glob("*.patch"):
+            if filepath.name == "method_signatures.patch":
+                continue
+            try:
+                for line in filepath.read_text(errors="ignore").splitlines():
+                    if line.startswith("From: "):
+                        sha = line[len("From: "):].strip()
+                        if re.fullmatch(r"[0-9a-f]{40}", sha):
+                            shas.add(sha)
+                        break  # only the first From: line matters
+            except OSError as err:
+                print(f"WARNING! Cannot read {filepath}: {err}")
+
+    if not shas:
+        print(
+            "WARNING! --continue found no pseudo patch with a commit SHA"
+            f" in {output_dir}: nothing to continue from, full scan instead."
+        )
+        return None
+
+    # Ancestry filter: only candidates that are ancestors of the serie tip
+    # (the target rev may have been force pushed since the last scan).
+    valid = []
+    for sha in shas:
+        try:
+            candidate = repo.commit(sha)
+        except (git.BadName, ValueError):
+            print(f"WARNING! --continue: SHA {sha[:10]} not in repo, ignored.")
+            continue
+        if repo.is_ancestor(candidate, end_commit):
+            valid.append(candidate)
+        else:
+            print(
+                f"WARNING! --continue: SHA {sha[:10]} is not an ancestor of"
+                f" {target_rev}, ignored (force pushed serie branch?)."
+            )
+
+    if not valid:
+        print(
+            "WARNING! --continue: none of the patch SHAs is an ancestor of"
+            f" {target_rev}: nothing to continue from, full scan instead."
+        )
+        return None
+
+    # rank by commit date; tie-break with the rev-list position (default
+    # rev-list order is newest first, so the LOWEST position is the
+    # newest commit: batch merges give several commits the same second)
+    topo_order = {
+        sha: pos
+        for pos, sha in enumerate(
+            repo.git.rev_list(target_rev).splitlines()
+        )
+    }
+
+    def rank(commit: git.Commit):
+        return (
+            commit.committed_date,
+            -topo_order.get(commit.hexsha, len(topo_order)),
+        )
+
+    start = max(valid, key=rank)
+    if start is None:  # unreachable: valid is non-empty here
+        return None
+    print(
+        f"--continue: resuming from {start.hexsha[:10]} -"
+        f" {datetime.fromtimestamp(start.committed_date).strftime('%Y-%m-%d %H:%M:%S')}:"
+        f" {start.message.splitlines()[0].strip()}"
+    )
+    return start
+
+
+def count_new_commits(
+    repo: git.Repo,
+    addon: str,
+    start_commit: git.Commit,
+    end_commit: git.Commit,
+    module_prefix: str = "addons/",
+) -> int:
+    """Number of serie commits that touched the addon models since
+    start_commit (cheap path-filtered walk, no diff computation)."""
+    if addon == "base" and module_prefix == "addons/":
+        module_path = "odoo/addons/base/models/"
+    else:
+        module_path = f"{module_prefix}{addon}/models/"
+    return sum(
+        1
+        for _ in repo.iter_commits(
+            f"{start_commit.hexsha}..{end_commit.hexsha}", paths=module_path
+        )
+    )
+
+
+CONTINUE_STATE_FILENAME = ".continue_state.json"
+README_ADDON_LIMIT = 60
+
+
+def read_continue_state(output_dir: str) -> Optional[dict]:
+    state_path = Path(output_dir) / CONTINUE_STATE_FILENAME
+    if not state_path.is_file():
+        return None
+    try:
+        return json.loads(state_path.read_text())
+    except (OSError, ValueError) as err:
+        print(
+            f"WARNING! Unreadable {state_path} ({err}): ignoring it."
+        )
+        return None
+
+
+def write_continue_state(
+    output_dir: str, complete: bool, end_sha: str = ""
+):
+    state_path = Path(output_dir) / CONTINUE_STATE_FILENAME
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {"complete": complete, "end_sha": end_sha},
+            )
+        )
+    except OSError as err:
+        print(f"WARNING! Cannot write {state_path}: {err}")
+
 
 def find_end_commit_by_serie(repo: git.Repo, target_serie: int, rev: str):
     """
@@ -464,7 +628,23 @@ def scan_addon_commits(
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
     module_prefix: str = "addons/",
+    start_index: int = -1,
+    force_methods: Optional[bool] = None,
+    continue_start: Optional[git.Commit] = None,
+    serie_start_commit: Optional[git.Commit] = None,
 ):
+    """Scan the addon commits and write the pseudo patches.
+    `start_index`: 0-based index of the last pseudo patch already present
+    in output_module_dir (--continue mode); new patches continue the
+    numbering after it. `force_methods`: force the method signatures
+    dump on (True) or off (False) even when no structural commit is
+    kept; default None keeps the legacy behavior (dump only when some
+    structural commit was kept or bypass mode). `continue_start`: the
+    resume commit of a --continue run (start_commit then holds the
+    resume commit for the structural scan). `serie_start_commit`: the
+    serie start (merge base) used for the method signature delta so it
+    keeps spanning the whole serie in --continue mode; defaults to
+    start_commit."""
     if addon == "base" and module_prefix == "addons/":
         module_path = "odoo/addons/base/models/"
     else:
@@ -484,8 +664,34 @@ def scan_addon_commits(
 
     result = []
 
+    # shas of the commits already kept in this analysis dir (--continue
+    # idempotency): a resume point that lands slightly too early (e.g.
+    # batch merges with identical commit seconds) must not produce
+    # duplicate patches for commits that were already kept
+    existing_shas = set()
+    if start_index >= 0:
+        existing = Path(output_module_dir)
+        if existing.is_dir():
+            for filepath in existing.glob("*.patch"):
+                if filepath.name == "method_signatures.patch":
+                    continue
+                try:
+                    first = filepath.read_text(errors="ignore").splitlines()[:6]
+                except OSError:
+                    continue
+                for line in first:
+                    if line.startswith("From: "):
+                        existing_shas.add(line[len("From: "):].strip())
+                        break
+
     if not bypass_structural_scan:
         for commit in commits:
+            if commit.hexsha in existing_shas:
+                print(
+                    f"SKIPPING already analysed commit {commit.hexsha[:10]}"
+                    f" {commit.message.strip().splitlines()[0]}"
+                )
+                continue
             message = commit.message.strip()
             summary = message.splitlines()[0]
             if "forwardport" in summary.lower().replace(" ", "").replace("-", ""):
@@ -615,7 +821,8 @@ def scan_addon_commits(
         os.makedirs(output_module_dir, exist_ok=True)
 
     result.reverse()
-    for idx, item in enumerate(result):
+    for item in result:
+        start_index += 1
         # print(f"Commit SHA: {item['commit_sha']}")
         print(f"\nTotal Changes: {item['total_changes']}")
         print(
@@ -647,7 +854,11 @@ def scan_addon_commits(
         else:
             prefix = "c"
 
-        filename = f"{output_module_dir}/{prefix}{str(idx).zfill(3)}{heat}_{item['pr'].split('/')[-1]}_{slugify(item['summary'])[:70]}.patch"
+        slug = slugify(item["summary"])[:70]
+        filename = (
+            f"{output_module_dir}/{prefix}{str(start_index).zfill(3)}"
+            f"{heat}_{item['pr'].split('/')[-1]}_{slug}.patch"
+        )
         print(filename)
 
         with open(filename, "w") as f:
@@ -668,7 +879,9 @@ def scan_addon_commits(
                 for diff_item in diffs:
                     f.write(diff_item)
 
-    if dump_methods and (result or bypass_structural_scan):
+    if dump_methods and (
+        bypass_structural_scan or force_methods is True or bool(result)
+    ):
         generate_method_signatures_diff(
             repo,
             addon,
@@ -677,10 +890,17 @@ def scan_addon_commits(
             output_module_dir,
             commit_items=result,
             module_prefix=module_prefix,
-            # the costly per-commit lookup only pays off when some
-            # structural commits were kept: small signature-only changes
-            # get their pseudo patch without commit bookkeeping
-            annotate_commits=bool(result),
+            # in --continue mode the regenerated delta spans the whole
+            # serie (serie_start -> tip), so the commit annotations must
+            # span it too: annotate whenever this run kept structural
+            # commits OR the addon already has kept patches from a
+            # previous scan (what the equivalent full scan would have
+            # produced). Only addons without any kept patch at all keep
+            # the cheap un-annotated dump.
+            annotate_commits=bool(result)
+            or (continue_start is not None and start_index >= 0),
+            annotate_start=serie_start_commit or start_commit,
+            serie_start=serie_start_commit or start_commit,
         )
 
 
@@ -746,13 +966,26 @@ def scan(
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
     addons: Optional[List[str]] = None,
-):
+    continue_run: bool = False,
+) -> Optional[str]:
+    """Scan the serie. Returns the end commit SHA when a full-serie
+    (--addon-less) run completed cleanly, else None. The --continue
+    logic uses that to maintain the .continue_state.json marker whose
+    complete=true verdict is what unlocks the next incremental resume."""
     # Initialize local repo object.
     # In the shared repo + worktrees layout (~/DEV/odoo.git + per serie
     # worktrees) a git checkout is impossible: each serie branch is already
     # checked out in its own worktree (or the shared repo would be bare).
     # So we never checkout anything: revs are resolved repo wide and the
     # worktree paths are only used for filesystem lookups (addons listing).
+    # `addons` is filled from the filesystem below, so remember now whether
+    # the addon list was narrowed by the caller (dependency chain) or if
+    # this is a whole-serie run: only the latter may mark the continue
+    # state as complete at the end.
+    # `addon` is reused as the loop variable below, so remember now
+    # whether the CLI scoped the run to a single addon
+    single_addon_mode = bool(addon)
+    narrowed_addons = addons is not None
     repo = git.Repo(repo_path, search_parent_directories=True)
     target_rev = f"{target_serie}.0"
     prev_rev = f"{target_serie - 1}.0"
@@ -856,6 +1089,65 @@ def scan(
         # manifestoo only knows released series, use the previous serie
         serie = f"{target_serie - 1}.0"
 
+    continue_start: Optional[git.Commit] = None
+    if continue_run:
+        # a scoped or interrupted scan would leave the addons at uneven
+        # frontiers: the next global resume would then skip the commits
+        # of the addons left behind (corruption of the global invariant)
+        if addon or (addons and len(addons) == 1):
+            print(
+                "Error! --continue cannot be combined with --addon:"
+                " it resumes ALL addons from one global resume commit"
+                " derived from the existing analysis; a single-addon run"
+                " would advance only that addon and later full resumes"
+                " would skip the commits of the others."
+            )
+            exit(1)
+
+        state = read_continue_state(output_dir)
+        if state and not state.get("complete", False):
+            print(
+                "Error! The previous scan of"
+                f" {output_dir} did not complete (marker"
+                f" {CONTINUE_STATE_FILENAME} present with complete=false)."
+                " Its analysis dirs are at uneven frontiers: resuming from"
+                " the newest kept commit would silently skip the commits"
+                " of the addons that were not reached. Recovery options:"
+            )
+            print(
+                "  - re-run the same scan without --continue to complete"
+                " it (the existing patch files are kept), then --continue again"
+            )
+            print(
+                "  - or delete the marker file"
+                f" {Path(output_dir) / CONTINUE_STATE_FILENAME} to accept"
+                " the risk"
+            )
+            exit(1)
+
+        continue_addons = addons if addons else ([addon] if addon else [])
+        continue_start = resolve_continue_start(
+            repo, output_dir, target_rev, end_commit, continue_addons
+        )
+        if continue_start is None:
+            print(
+                "No usable --continue start found: falling back to a"
+                " full serie scan."
+            )
+        elif continue_start == end_commit:
+            print(
+                "--continue: the serie tip is already the newest kept"
+                " commit: nothing new to scan."
+            )
+            write_continue_state(
+                output_dir, complete=True, end_sha=end_commit.hexsha
+            )
+            return end_commit.hexsha
+
+        # guard the next resume: if this run is interrupted, the marker
+        # tells the next --continue that the dirs are at uneven frontiers
+        write_continue_state(output_dir, complete=False)
+
     for addon in addons:
         output_module_dir = (
             f"{output_dir}/{addon}"  # TODO we might add a version dir for OpenUpgrade
@@ -887,16 +1179,74 @@ def scan(
             with open(f"{output_module_dir}/dependencies.txt", "w") as f:
                 f.write(manifestoo_output)
 
+        addon_start = start_commit
+        start_idx = -1
+        force_methods: Optional[bool] = None
+        if continue_run and continue_start is not None:
+            addon_dir = Path(output_module_dir)
+            has_patches = addon_dir.is_dir() and any(addon_dir.glob("*.patch"))
+            if has_patches:
+                # incremental: resume after the newest kept pseudo commit
+                addon_start = continue_start
+                start_idx = latest_patch_index(output_module_dir)
+            else:
+                # addon absent from the previous analysis: scan it fully
+                # from the serie merge base like a first run would
+                print(
+                    f"NOTE! --continue: no existing analysis for {addon},"
+                    " scanning it fully from the merge base."
+                )
+            # regenerate the method signatures only when the module
+            # received at least one commit since the resume commit
+            force_methods = (
+                count_new_commits(
+                    repo,
+                    addon,
+                    continue_start,
+                    end_commit,
+                )
+                > 0
+            )
+            if not force_methods and has_patches:
+                print(
+                    f"--continue: no new commit in {addon} models since"
+                    f" {continue_start.hexsha[:10]}:"
+                    " keeping its method_signatures.patch as is."
+                )
+
         scan_addon_commits(
             repo,
             addon,
-            start_commit,
+            addon_start,
             end_commit,
             output_module_dir,
             keep_noise,
             dump_methods,
             bypass_structural_scan,
+            start_index=start_idx,
+            force_methods=force_methods,
+            continue_start=continue_start,
+            serie_start_commit=start_commit,
         )
+
+    if continue_run:
+        # clean exit: the analysis dirs share the same frontier again
+        write_continue_state(
+            output_dir, complete=True, end_sha=end_commit.hexsha
+        )
+    elif not single_addon_mode and not narrowed_addons:
+        # full-serie run without --continue: on clean completion, mark
+        # the dirs even so a later --continue is allowed (this is the
+        # documented recovery for an interrupted previous run)
+        write_continue_state(
+            output_dir, complete=True, end_sha=end_commit.hexsha
+        )
+        create_serie_readme(
+            target_serie,
+            output_dir,
+            prev_serie=target_serie - 1,
+        )
+    return end_commit.hexsha
 
 
 def scan_serie_addon(target_serie: int, addon: str, output_dir: str):
@@ -932,39 +1282,87 @@ def scan_serie_addon(target_serie: int, addon: str, output_dir: str):
     return addon_dir.is_dir() and any(addon_dir.glob("*.patch"))
 
 
-def create_serie_readme(target_serie: int, output_dir: str):
-    result = subprocess.run(
-        ["find", ".", "-type", "f", "-name", "*.patch"],
-        capture_output=True,
-        cwd=output_dir,
-        text=True,
-    )
-    commits = len(result.stdout.splitlines())
+def human_size(num_bytes: int) -> str:
+    """K-style human readable size, one decimal below 10 (e.g. 488K,
+    1.1M) to stay close to the historical du-based README numbers."""
+    value = float(num_bytes)
+    for unit in ("", "K", "M", "G"):
+        if value < 1024 or unit == "G":
+            if unit and value < 10:
+                return f"{value:.1f}{unit}"
+            return f"{value:.0f}{unit}"
+        value /= 1024
+    return f"{value:.0f}G"
 
-    commits_size = subprocess.run(
-        ["du", "-sh", "."],
-        capture_output=True,
-        cwd=output_dir,
-        text=True,
-    ).stdout
 
-    command = 'du -sh -- */ | sort -rh | head -n 30 | awk \'{sub(/\\/$/, "", $2); print NR ". " $2 " - " $1}\''
-    result = subprocess.run(
-        command, shell=True, capture_output=True, cwd=output_dir, text=True
-    )
-    table = result.stdout
+def create_serie_readme(
+    target_serie: int,
+    output_dir: str,
+    prev_serie: int,
+    github_base: str = "https://github.com/akretion/odoo-module-diff-analysis/blob/main",
+) -> None:
+    """Regenerate <output_dir>/README.md: a short, human browsable
+    ranking of the most impacted addons (README_ADDON_LIMIT lines),
+    each linking to the addon directory in the published analysis repo
+    (github.com/akretion/odoo-module-diff-analysis)."""
+    root = Path(output_dir)
+    addons_stats = []
+    total_patches = 0
+    total_bytes = 0
+    for addon_dir in sorted(root.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+        patch_files = [
+            f
+            for f in addon_dir.glob("*.patch")
+            if f.name != "method_signatures.patch"
+        ]
+        if not patch_files:
+            continue
+        # patch bytes only (method_signatures.patch excluded: it is a
+        # per-addon constant, not the weight of the data model commits)
+        addon_bytes = sum(f.stat().st_size for f in patch_files)
+        addons_stats.append((addon_dir.name, len(patch_files), addon_bytes))
+        total_patches += len(patch_files)
+        total_bytes += addon_bytes
 
-    readme = f"""# How crazy it is to migrate to Odoo {target_serie}.0?
+    if not addons_stats:
+        print(f"No patch found in {output_dir}: no README.md generated.")
+        return
 
-There are {commits} non trivial commits impacting the database structure to migrate
-from Odoo {target_serie -1}.0 to {target_serie}.0
-Together theses commits weight {commits_size}.
+    addons_stats.sort(key=lambda item: item[2], reverse=True)
+    shown = addons_stats[:README_ADDON_LIMIT]
+    lines = [
+        f"# Dude, what did they do to my Odoo at version {target_serie}.0?",
+        "",
+        "You can see below the Odoo addons that got the largest data model",
+        f"changes between versions {prev_serie}.0 and {target_serie}.0:",
+        "(this is just summing the size of the data model impacting commits",
+        "addon per addon; method signature deltas are in each addon's",
+        "method_signatures.patch)",
+        "You can browse each directory to dig into the detail of these changes.",
+        "",
+    ]
+    for rank, (name, count, size) in enumerate(shown, 1):
+        link = f"{github_base}/{target_serie}.0/{name}"
+        plural = "commit" if count == 1 else "commits"
+        lines.append(
+            f"{rank}. [{name}]({link}) - {human_size(size)} ({count} {plural})"
+        )
+    lines += [
+        "",
+        f"In total: {len(addons_stats)} addons, {total_patches} data model",
+        f"impacting commits, {human_size(total_bytes)} of pseudo patches.",
+        "",
+        "Generated by [odoo-module-diff]"
+        "(https://github.com/akretion/odoo-module-diff): these numbers are",
+        "heuristic (see the repo README); the full pseudo patches are in each",
+        "addon directory.",
+    ]
 
-The addons that changed the most are listed below with their relative migration commit sizes:
-    """
-
-    with open(f"{output_dir}/README.md", "w") as f:
-        f.write(readme)
+    with open(root / "README.md", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"Generated {root / 'README.md'} ({len(shown)} addons listed)")
 
 
 app = typer.Typer()
@@ -996,8 +1394,38 @@ def main(
     from_serie: float = 0,
     to_serie: float = 0,
     max_bytes_per_step: int = 0,
+    continue_run: bool = typer.Option(
+        False,
+        "--continue",
+        help="Incremental scan: resume after the newest pseudo commit"
+        " already present in the analysis output of the target serie"
+        " (a `From:` SHA of the existing patches), instead of rescanning"
+        " the whole serie. Fetches the serie branch first"
+        " (--no-fetch to skip).",
+    ),
+    no_fetch: bool = typer.Option(
+        False,
+        "--no-fetch",
+        help="With --continue: do not fetch the serie branch before the"
+        " incremental scan.",
+    ),
 ):
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if continue_run:
+        if commit:
+            print(
+                "Error! --continue and --commit are mutually exclusive:"
+                " --commit analyses a single past commit while --continue"
+                " extends an existing analysis up to the serie tip."
+            )
+            exit(1)
+        if from_analysis or (from_serie and to_serie):
+            print(
+                "Error! --continue applies to a fresh git scan of the"
+                " serie, not to the cache/span aggregation modes."
+            )
+            exit(1)
 
     if not target_serie and not (from_analysis or (from_serie and to_serie)):
         print(
@@ -1124,6 +1552,22 @@ def main(
     # in with_external mode, external addons of the chain are scanned on the
     # fly in their own repo, not in odoo.git where they don't exist
     scan_addons = core_chain
+    if continue_run and not no_fetch:
+        # fetch once, before resolving the start/end commits: the whole
+        # point of --continue is to catch the newest serie commits
+        fetched_rev = f"{int(target_serie)}.0"  # bare branch name for the fetch
+        try:
+            scan_repo = git.Repo(
+                repo_path or str(Path.cwd()), search_parent_directories=True
+            )
+            print(f"Fetching origin {fetched_rev} ...")
+            scan_repo.git.fetch("origin", fetched_rev)
+        except git.GitCommandError as err:
+            print(
+                f"WARNING! Fetch of origin {fetched_rev} failed"
+                " (offline? branch not created yet?):"
+                f" continuing with the local tip. ({err})"
+            )
     scan(
         repo_path=repo_path,
         target_serie=target_serie,
@@ -1135,6 +1579,7 @@ def main(
         dump_methods=dump_methods,
         bypass_structural_scan=bypass_structural_scan,
         addons=scan_addons,
+        continue_run=continue_run,
     )
     if with_external:
         for chain_addon in context_addons or ([addon] if addon else []):

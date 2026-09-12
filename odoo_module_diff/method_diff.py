@@ -217,14 +217,23 @@ def generate_method_signatures_diff(
     commit_items: Optional[List[Dict[str, Any]]] = None,
     module_prefix: str = "addons/",
     annotate_commits: bool = True,
+    annotate_start: Optional[git.Commit] = None,
+    serie_start: Optional[git.Commit] = None,
 ):
     """
     Generates method_signatures.patch for the given addon between start_commit and end_commit.
     Methods are grouped by Odoo model ID (_name / _inherit).
     Move-invariant: methods moved without signature change are ignored.
+    `annotate_start` optionally restricts the costly commit annotation
+    lookup to a smaller window (e.g. resume..tip in --continue mode).
+    `serie_start` optionally overrides the start commit of the signature
+    delta itself (e.g. the serie merge base in --continue mode, while
+    start_commit holds the resume commit for the structural scan).
     """
     print(f"Extracting method signatures for {addon} at start/end commits...")
-    methods_start = extract_methods_from_commit(start_commit, addon, module_prefix)
+    methods_start = extract_methods_from_commit(
+        serie_start or start_commit, addon, module_prefix
+    )
     methods_end = extract_methods_from_commit(end_commit, addon, module_prefix)
 
     all_models = sorted(set(methods_start.keys()) | set(methods_end.keys()))
@@ -269,9 +278,10 @@ def generate_method_signatures_diff(
     if annotate_commits:
         # this lookup is the costly part (full patch content of every
         # commit); it is only worth it when structural commits were kept
+        lookup_start = annotate_start or start_commit
         print(f"Mapping commit SHAs for changed methods in {addon}...")
         commit_map = build_commit_map_from_repo(
-            repo, addon, start_commit, end_commit, module_prefix
+            repo, addon, lookup_start, end_commit, module_prefix
         )
     else:
         print(
