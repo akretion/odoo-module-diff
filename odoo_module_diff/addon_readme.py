@@ -25,13 +25,17 @@ import urllib.request
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from odoo_module_diff.context import build_context
-
 ADDON_README_LIMIT = 30
 ADDON_README_MAX_CHARS = 4800
-# prompt budget for the pseudo patches (methods first, then by heat,
-# mirroring the migration context ordering)
-ADDON_README_PATCH_BUDGET = 120_000
+# prompt budget for the pseudo patch digests. 800KB ~ 220K tokens on the
+# DeepSeek tokenizer (3.6 chars/token measured): the budget only caps
+# pathological cases, the effective size is driven by the per-patch dump
+# budget below and stays ~10-30x under this limit.
+ADDON_README_PATCH_BUDGET = 800_000
+# each patch digest keeps its header (commit meta + change matches: the
+# signal) plus this many chars of the raw diff dump after the
+# 'pseudo patch:' marker (the hunk-level evidence)
+ADDON_README_DUMP_BUDGET = 30_000
 # max chars of release-note sections fed to the LLM per addon
 ADDON_README_NOTES_BUDGET = 80_000
 RELEASE_NOTES_FILENAME = "RELEASE_NOTE.md"
@@ -47,6 +51,59 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
     " (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
+
+
+def _patch_digest(path: Path) -> str:
+    """Digest of a pseudo patch: the header part (commit meta, breaking
+    change scores and the 'change matches' list of removed/added fields
+    with their model context) plus a bounded excerpt of the raw diff
+    dump. A 432KB patch like the 13.0 accounting-pocalypse digests to
+    ~50KB; the change matches are what identifies a model merge, the
+    diff excerpt adds the hunk-level evidence."""
+    text = path.read_text(errors="ignore")
+    marker = text.find("pseudo patch:")
+    if marker <= 0:
+        digest = text
+    else:
+        digest = text[:marker] + text[marker : marker + ADDON_README_DUMP_BUDGET]
+        if marker + ADDON_README_DUMP_BUDGET < len(text):
+            digest += "\n... (diff dump truncated)\n"
+    return digest
+
+
+def build_patch_digest_context(serie: int, addon_dir: Path) -> str:
+    """Aggregated context for the README prompt: one digest per pseudo
+    patch, BIGGEST FIRST (a huge refactor like a model merge matters more
+    than a small field tweak), within ADDON_README_PATCH_BUDGET. Unlike
+    build_context (designed for agent prompts that want breadth), no
+    commit is silently dropped while the budget holds."""
+    entries = []
+    for path in addon_dir.glob("*.patch"):
+        if path.name == "method_signatures.patch":
+            continue
+        digest = _patch_digest(path)
+        entries.append((len(digest), path.name, digest))
+    entries.sort(reverse=True)
+    lines = [
+        f"# Pseudo patch digests of the addon ({serie - 1}.0 -> {serie}.0)",
+        "",
+    ]
+    used = 0
+    skipped = []
+    for size, name, digest in entries:
+        if used + size > ADDON_README_PATCH_BUDGET:
+            skipped.append(f"{name} ({size} bytes)")
+            continue
+        used += size
+        lines += [f"## Commit patch: {name}", "", digest, ""]
+    if skipped:
+        lines += [
+            "## Skipped patches (budget reached)",
+            "",
+        ]
+        lines += [f"- {item}" for item in skipped]
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _load_llm_api_key(provider: str) -> str:
@@ -320,14 +377,7 @@ def generate_addon_readme(
     if api_key:
         os.environ.setdefault(f"{provider.upper()}_API_KEY", api_key)
 
-    patches_context = build_context(
-        addons=[addon],
-        addons_dirs={addon: str(addon_dir)},
-        from_label=f"{serie - 1}.0",
-        to_label=f"{serie}.0",
-        max_bytes=ADDON_README_PATCH_BUDGET,
-        header=False,
-    )
+    patches_context = build_patch_digest_context(serie, addon_dir)
 
     notes_context = ""
     if notes_path:
