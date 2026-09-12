@@ -370,15 +370,28 @@ customer still on {prev_serie}.0.
 {ADDON_README_MAX_CHARS} characters."""
     try:
         content = _call_llm(model, system, user)
+        if not content.strip():
+            # rare transient empty answer from the reasoning model
+            print(f"Empty LLM answer for {addon}: retrying once ...")
+            content = _call_llm(model, system, user)
     except Exception as err:
         print(
             f"WARNING! LLM call failed for {addon} ({err}): skipping its"
             " README generation."
         )
         return False
+    if not content.strip():
+        print(
+            f"WARNING! Empty LLM answer for {addon} twice: keeping its"
+            " README.md unchanged."
+        )
+        return False
 
     content = content.strip()
     content = re.sub(r"^```(?:markdown)?\n|```$", "", content).strip()
+    if not content:
+        print(f"WARNING! Empty markdown for {addon}: keeping its README.md.")
+        return False
     if len(content) > ADDON_README_MAX_CHARS:
         # hard limit: cut at the last line boundary that fits
         cut = content.rfind("\n", 0, ADDON_README_MAX_CHARS + 1)

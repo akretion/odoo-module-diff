@@ -1425,10 +1425,15 @@ def main(
         "",
         "--addon-readme",
         help="Generate the per addon README.md summary of the given addon"
-        " (LLM based, needs litellm), reading the existing analysis of the"
-        " serie. Without a value, limit it to the 30 addons with the most"
-        " changes (same ranking as the per serie README). Add"
-        " --from-analysis <dir> to point at the serie analysis dir.",
+        " (LLM based), reading the existing analysis of the serie"
+        " instead of scanning.",
+    ),
+    addon_readmes: bool = typer.Option(
+        False,
+        "--addon-readmes",
+        help="Generate the per addon README.md summaries of the 30 addons"
+        " with the most changes (same ranking as the per serie README),"
+        " reading the existing analysis instead of scanning.",
     ),
     skip_addon_readmes: bool = typer.Option(
         False,
@@ -1439,14 +1444,21 @@ def main(
 ):
     target_serie = int(target_serie)  # (float this allows .0)
 
-    if addon_readme != "" and addon_readme is not False:
+    if (addon_readme or addon_readmes) and not from_analysis and not target_serie:
+        print(
+            "Error! --addon-readme/--addon-readmes need the serie analysis:"
+            " pass --from-analysis <serie dir> (e.g."
+            " ~/DEV/odoo-module-diff-analysis/19.0) or the serie"
+            " positionally."
+        )
+        exit(1)
+
+    if addon_readme or addon_readmes:
         # standalone per addon README mode: aggregate from the analysis
         # cache, no git scan
         analysis_root = from_analysis or output_dir
-        if wrap_serie_dir and not re.fullmatch(
-            r"\d+\.0", Path(analysis_root).name
-        ):
-            analysis_root += f"/{target_serie}.0" if target_serie else ""
+        if target_serie and not re.fullmatch(r"\d+\.0", Path(analysis_root).name):
+            analysis_root += f"/{target_serie}.0"
         if not target_serie:
             match = re.fullmatch(r"(\d+)\.0", Path(analysis_root).name)
             if not match:
@@ -1459,15 +1471,10 @@ def main(
             target_serie = int(match.group(1))
         from odoo_module_diff.addon_readme import generate_addon_readmes
 
-        readme_addon = (
-            addon_readme
-            if addon_readme and addon_readme != "True" and addon_readme is not True
-            else None
-        )
         generate_addon_readmes(
             target_serie,
             analysis_root,
-            addon=readme_addon,
+            addon=addon_readme or None,
         )
         return
 
