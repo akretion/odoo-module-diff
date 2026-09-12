@@ -44,6 +44,54 @@ def _norm_code(line: str) -> str:
 
 ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 
+ANALYSIS_HOME_URL = "https://github.com/akretion/odoo-module-diff-analysis"
+
+
+def analysis_home(explicit: str = "") -> str:
+    """Root dir holding the per-serie analysis dirs (<home>/<serie>.0/).
+
+    Resolution order: the explicit path passed by the caller
+    (--from-analysis), then $ODOO_MODULE_DIFF_HOME (the recommended
+    setup: a local clone of the shared odoo-module-diff-analysis
+    repository), then the legacy $ODOO_MODULE_DIFF_ANALYSIS alias, then
+    the historical ~/DEV/odoo-module-diff-analysis default.
+
+    Scanning all the Odoo commits from scratch is extremely slow, so the
+    pseudo patches of every serie are meant to be shared through the
+    odoo-module-diff-analysis project: when no local analysis home is
+    configured a warning suggests cloning it and setting
+    ODOO_MODULE_DIFF_HOME before the default location is used.
+    """
+    if explicit:
+        return str(Path(explicit).expanduser())
+    env_home = os.environ.get("ODOO_MODULE_DIFF_HOME") or os.environ.get(
+        "ODOO_MODULE_DIFF_ANALYSIS"
+    )
+    if env_home:
+        home = Path(env_home).expanduser()
+        if not home.is_dir():
+            print(
+                f"WARNING! The configured analysis home {home}"
+                " (ODOO_MODULE_DIFF_HOME) does not exist or is not a"
+                " directory: scans and cache modes will find nothing"
+                f" there. Clone {ANALYSIS_HOME_URL} to that location (or"
+                " fix the variable) unless you really want to rescan the"
+                " Odoo commits from scratch."
+            )
+        return str(home)
+    default = str(Path.home() / "DEV" / "odoo-module-diff-analysis")
+    print(
+        "WARNING! No analysis home configured ($ODOO_MODULE_DIFF_HOME is"
+        f" not set): using the default {default}. Scanning every Odoo"
+        " commit from scratch is extremely slow: the pseudo patches of"
+        " all the series are shared through"
+        f" {ANALYSIS_HOME_URL}; clone it locally once (e.g. into"
+        " ~/DEV/odoo-module-diff-analysis) and point"
+        " ODOO_MODULE_DIFF_HOME at the clone."
+    )
+    return default
+
+
 BLACKLISTS = [
     "adapt model class names to correspond to model names",
     "Restore the model `_name`",
@@ -1444,31 +1492,51 @@ def main(
 ):
     target_serie = int(target_serie)  # (float this allows .0)
 
-    if (addon_readme or addon_readmes) and not from_analysis and not target_serie:
-        print(
-            "Error! --addon-readme/--addon-readmes need the serie analysis:"
-            " pass --from-analysis <serie dir> (e.g."
-            " ~/DEV/odoo-module-diff-analysis/19.0) or the serie"
-            " positionally."
-        )
-        exit(1)
-
     if addon_readme or addon_readmes:
         # standalone per addon README mode: aggregate from the analysis
         # cache, no git scan
-        analysis_root = from_analysis or output_dir
-        if target_serie and not re.fullmatch(r"\d+\.0", Path(analysis_root).name):
-            analysis_root += f"/{target_serie}.0"
+        analysis_root = from_analysis or analysis_home()
         if not target_serie:
+            # the serie can come from a <serie>.0 analysis root or from a
+            # <home>/<serie>.0 dir inside it
             match = re.fullmatch(r"(\d+)\.0", Path(analysis_root).name)
             if not match:
-                print(
-                    "Error! --addon-readme needs the serie: pass it"
-                    " positionally or use an analysis dir named like"
-                    " <serie>.0"
+                serie_dirs = sorted(
+                    p.name
+                    for p in Path(analysis_root).glob("*.0")
+                    if p.is_dir() and re.fullmatch(r"\d+\.0", p.name)
                 )
-                exit(1)
+                if len(serie_dirs) == 1:
+                    analysis_root = str(Path(analysis_root) / serie_dirs[0])
+                    match = re.fullmatch(r"(\d+)\.0", serie_dirs[0])
+                    assert match is not None
+                elif len(serie_dirs) > 1:
+                    print(
+                        "Error! Several serie dirs found in"
+                        f" {analysis_root} ({', '.join(serie_dirs)}):"
+                        " pass the serie as the second positional (or use"
+                        " --from-analysis <dir> named like <serie>.0)."
+                    )
+                    exit(1)
+                else:
+                    print(
+                        "Error! No <serie>.0 analysis dir found in"
+                        f" {analysis_root}: pass the serie as the second"
+                        " positional or use --from-analysis <dir> named"
+                        " like <serie>.0."
+                    )
+                    exit(1)
             target_serie = int(match.group(1))
+        if target_serie and not re.fullmatch(r"\d+\.0", Path(analysis_root).name):
+            analysis_root += f"/{target_serie}.0"
+        if not Path(analysis_root).is_dir():
+            print(
+                f"Error! No analysis dir found at {analysis_root}: pass"
+                " --from-analysis <serie dir> (e.g."
+                " ~/DEV/odoo-module-diff-analysis/19.0) or the serie"
+                " positionally."
+            )
+            exit(1)
         from odoo_module_diff.addon_readme import generate_addon_readmes
 
         generate_addon_readmes(
@@ -1508,10 +1576,7 @@ def main(
                 " --to-serie greater than --from-serie."
             )
             exit(1)
-        analysis_root = from_analysis or os.environ.get(
-            "ODOO_MODULE_DIFF_ANALYSIS",
-            str(Path.home() / "DEV" / "odoo-module-diff-analysis"),
-        )
+        analysis_root = from_analysis or analysis_home()
         dump_span_context(
             addon,
             int(from_serie),
