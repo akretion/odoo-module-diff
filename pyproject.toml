@@ -36,6 +36,9 @@ test = [
     "pytest",
     "coverage[toml]",
 ]
+llm = [
+    "openai",
+]
 
 [tool.setuptools]
 license-files = ["LICENSE"]
