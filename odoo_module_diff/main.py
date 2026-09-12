@@ -967,6 +967,7 @@ def scan(
     bypass_structural_scan: bool = False,
     addons: Optional[List[str]] = None,
     continue_run: bool = False,
+    skip_addon_readmes: bool = False,
 ) -> Optional[str]:
     """Scan the serie. Returns the end commit SHA when a full-serie
     (--addon-less) run completed cleanly, else None. The --continue
@@ -1246,6 +1247,10 @@ def scan(
             output_dir,
             prev_serie=target_serie - 1,
         )
+        if not skip_addon_readmes:
+            from odoo_module_diff.addon_readme import generate_addon_readmes
+
+            generate_addon_readmes(target_serie, output_dir)
     return end_commit.hexsha
 
 
@@ -1295,20 +1300,11 @@ def human_size(num_bytes: int) -> str:
     return f"{value:.0f}G"
 
 
-def create_serie_readme(
-    target_serie: int,
-    output_dir: str,
-    prev_serie: int,
-    github_base: str = "https://github.com/akretion/odoo-module-diff-analysis/blob/main",
-) -> None:
-    """Regenerate <output_dir>/README.md: a short, human browsable
-    ranking of the most impacted addons (README_ADDON_LIMIT lines),
-    each linking to the addon directory in the published analysis repo
-    (github.com/akretion/odoo-module-diff-analysis)."""
-    root = Path(output_dir)
+def addons_patch_stats(root: Path) -> list:
+    """Patch stats per addon dir: [(addon, patch_count, patch_bytes)]
+    sorted by descending patch bytes, method_signatures.patch excluded.
+    Shared by the per-serie README and the per-addon README summaries."""
     addons_stats = []
-    total_patches = 0
-    total_bytes = 0
     for addon_dir in sorted(root.iterdir()):
         if not addon_dir.is_dir():
             continue
@@ -1323,8 +1319,24 @@ def create_serie_readme(
         # per-addon constant, not the weight of the data model commits)
         addon_bytes = sum(f.stat().st_size for f in patch_files)
         addons_stats.append((addon_dir.name, len(patch_files), addon_bytes))
-        total_patches += len(patch_files)
-        total_bytes += addon_bytes
+    addons_stats.sort(key=lambda item: item[2], reverse=True)
+    return addons_stats
+
+
+def create_serie_readme(
+    target_serie: int,
+    output_dir: str,
+    prev_serie: int,
+    github_base: str = "https://github.com/akretion/odoo-module-diff-analysis/blob/main",
+) -> None:
+    """Regenerate <output_dir>/README.md: a short, human browsable
+    ranking of the most impacted addons (README_ADDON_LIMIT lines),
+    each linking to the addon directory in the published analysis repo
+    (github.com/akretion/odoo-module-diff-analysis)."""
+    root = Path(output_dir)
+    addons_stats = addons_patch_stats(root)
+    total_patches = sum(count for _name, count, _size in addons_stats)
+    total_bytes = sum(size for _name, _count, size in addons_stats)
 
     if not addons_stats:
         print(f"No patch found in {output_dir}: no README.md generated.")
@@ -1409,8 +1421,55 @@ def main(
         help="With --continue: do not fetch the serie branch before the"
         " incremental scan.",
     ),
+    addon_readme: str = typer.Option(
+        "",
+        "--addon-readme",
+        help="Generate the per addon README.md summary of the given addon"
+        " (LLM based, needs litellm), reading the existing analysis of the"
+        " serie. Without a value, limit it to the 30 addons with the most"
+        " changes (same ranking as the per serie README). Add"
+        " --from-analysis <dir> to point at the serie analysis dir.",
+    ),
+    skip_addon_readmes: bool = typer.Option(
+        False,
+        "--skip-addon-readmes",
+        help="On a whole serie scan, do not generate the per addon"
+        " README.md summaries of the top 30 addons.",
+    ),
 ):
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if addon_readme != "" and addon_readme is not False:
+        # standalone per addon README mode: aggregate from the analysis
+        # cache, no git scan
+        analysis_root = from_analysis or output_dir
+        if wrap_serie_dir and not re.fullmatch(
+            r"\d+\.0", Path(analysis_root).name
+        ):
+            analysis_root += f"/{target_serie}.0" if target_serie else ""
+        if not target_serie:
+            match = re.fullmatch(r"(\d+)\.0", Path(analysis_root).name)
+            if not match:
+                print(
+                    "Error! --addon-readme needs the serie: pass it"
+                    " positionally or use an analysis dir named like"
+                    " <serie>.0"
+                )
+                exit(1)
+            target_serie = int(match.group(1))
+        from odoo_module_diff.addon_readme import generate_addon_readmes
+
+        readme_addon = (
+            addon_readme
+            if addon_readme and addon_readme != "True" and addon_readme is not True
+            else None
+        )
+        generate_addon_readmes(
+            target_serie,
+            analysis_root,
+            addon=readme_addon,
+        )
+        return
 
     if continue_run:
         if commit:
@@ -1580,6 +1639,7 @@ def main(
         bypass_structural_scan=bypass_structural_scan,
         addons=scan_addons,
         continue_run=continue_run,
+        skip_addon_readmes=skip_addon_readmes,
     )
     if with_external:
         for chain_addon in context_addons or ([addon] if addon else []):
