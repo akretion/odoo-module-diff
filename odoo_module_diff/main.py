@@ -1476,6 +1476,19 @@ def main(
         " (LLM based), reading the existing analysis of the serie"
         " instead of scanning.",
     ),
+    odoo_cfg: str = typer.Option(
+        "",
+        "--odoo-cfg",
+        help="Odoo config file whose addons_path is used to locate"
+        " external (OCA / custom project) addons, e.g."
+        " ~/DEV/odoo18/odoo.cfg.",
+    ),
+    addons_path_opt: str = typer.Option(
+        "",
+        "--addons-path",
+        help="Comma separated addons path used to locate external"
+        " addons (alternative to --odoo-cfg).",
+    ),
     addon_readmes: bool = typer.Option(
         False,
         "--addon-readmes",
@@ -1491,6 +1504,39 @@ def main(
     ),
 ):
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if addon and (odoo_cfg or addons_path_opt):
+        # external addon mode: locate the OCA / custom addon through the
+        # addons paths and analyse its milestones on the fly (PR based).
+        # The result is a dumped context, so --dump-context/--stdout is
+        # required.
+        from odoo_module_diff.external_locate import locate_external_addon
+
+        found = locate_external_addon(addon, odoo_cfg, addons_path_opt)
+        if not found:
+            print(
+                f"Error! Addon {addon} not found in the addons paths (or"
+                " it is a core addon: analyse it without --odoo-cfg)."
+            )
+            exit(1)
+        if not dump_context and not stdout:
+            print(
+                "Error! External addon analysis requires --dump-context"
+                " (or --stdout): the milestone context is built on the"
+                " fly and must be dumped somewhere."
+            )
+            exit(1)
+        from odoo_module_diff.external_milestones import dump_external_context
+
+        dump_external_context(
+            addon,
+            odoo_cfg=odoo_cfg,
+            addons_path_str=addons_path_opt,
+            target_serie=target_serie,
+            output_file=output_file,
+            stdout=stdout,
+        )
+        return
 
     if addon_readme or addon_readmes:
         # standalone per addon README mode: aggregate from the analysis
