@@ -9,6 +9,7 @@ target serie.
 """
 
 from pathlib import Path
+from typing import List, Optional
 
 from odoo_module_diff.context import build_context
 
@@ -26,21 +27,26 @@ def build_span_context(
     max_bytes_per_step: int = 0,
     max_bytes: int = 0,
     header: bool = True,
+    chain_addons: List[str] | None = None,
 ) -> str:
     """Build the multi-serie context: one section per serie step.
-    `analysis_root` holds one `<serie>.0/` subdir per serie."""
+    `analysis_root` holds one `<serie>.0/` subdir per serie.
+    `chain_addons` optionally extends the context to the dependency
+    chain (dependencies first, target addon last)."""
     from odoo_module_diff.main import scan_serie_addon  # late import
 
+    addons = chain_addons or [addon]
     missing_scans = []
     for target_serie in serie_range(from_serie, to_serie):
         analysis_dir = Path(analysis_root) / f"{target_serie}.0"
-        addon_dir = analysis_dir / addon
-        if not addon_dir.is_dir() or not any(addon_dir.glob("*.patch")):
-            scanned = scan_serie_addon(
-                target_serie, addon, str(analysis_dir)
-            )
-            if not scanned:
-                missing_scans.append(target_serie)
+        for chain_addon in addons:
+            addon_dir = analysis_dir / chain_addon
+            if not addon_dir.is_dir() or not any(addon_dir.glob("*.patch")):
+                scanned = scan_serie_addon(
+                    target_serie, chain_addon, str(analysis_dir)
+                )
+                if not scanned:
+                    missing_scans.append((target_serie, chain_addon))
 
     lines = []
     if header:
@@ -49,7 +55,12 @@ def build_span_context(
             "",
             f"- Migration span: {from_serie}.0 -> {to_serie}.0"
             f" ({to_serie - from_serie} step(s))",
-            f"- Addon: {addon}",
+            f"- Addon: {addon}"
+            + (
+                f" (with dependencies: {', '.join(addons[:-1])})"
+                if len(addons) > 1
+                else ""
+            ),
             "",
             "> **NOTICE:** this is an extraction of the main breaking",
             "> changes pseudo commits done between the 2 Odoo series. But",
@@ -66,33 +77,42 @@ def build_span_context(
         ]
     for target_serie in serie_range(from_serie, to_serie):
         analysis_dir = Path(analysis_root) / f"{target_serie}.0"
-        addon_dir = analysis_dir / addon
-        if not addon_dir.is_dir() or not any(addon_dir.glob("*.patch")):
-            lines += [
-                "=" * 78,
-                f"## STEP {target_serie - 1}.0 -> {target_serie}.0",
-                "=" * 78,
-                "",
-                f"[MISSING: no analysis files for {addon} in serie"
-                f" {target_serie}.0. Run odoo-module-diff on it first.]",
-                "",
-            ]
-            continue
-        step = build_context(
-            [addon],
-            {addon: str(addon_dir)},
-            from_label=f"{target_serie - 1}.0",
-            to_label=f"{target_serie}.0",
-            max_bytes=max_bytes_per_step,
-            header=False,
-        )
-        lines += [f"## STEP {target_serie - 1}.0 -> {target_serie}.0", "", step, ""]
+        lines += [
+            "=" * 78,
+            f"## STEP {target_serie - 1}.0 -> {target_serie}.0",
+            "=" * 78,
+            "",
+        ]
+        addons_dirs = {}
+        chain = []
+        for chain_addon in addons:
+            addon_dir = analysis_dir / chain_addon
+            if addon_dir.is_dir() and any(addon_dir.glob("*.patch")):
+                addons_dirs[chain_addon] = str(addon_dir)
+                chain.append(chain_addon)
+            else:
+                lines += [
+                    f"[MISSING: no analysis files for {chain_addon} in"
+                    f" serie {target_serie}.0. Run odoo-module-diff on it"
+                    " first.]",
+                    "",
+                ]
+        if chain:
+            step = build_context(
+                chain,
+                addons_dirs,
+                from_label=f"{target_serie - 1}.0",
+                to_label=f"{target_serie}.0",
+                max_bytes=max_bytes_per_step,
+                header=False,
+            )
+            lines += [step, ""]
     if missing_scans:
         lines += [
             "## Serie steps that could not be scanned on demand",
             "",
         ]
-        lines += [f"- {s}.0" for s in missing_scans]
+        lines += [f"- {s}.0/{a}" for s, a in missing_scans]
         lines.append("")
     if max_bytes and len("\n".join(lines).encode()) > max_bytes:
         lines += [
@@ -112,6 +132,7 @@ def dump_span_context(
     stdout: bool = False,
     max_bytes_per_step: int = 0,
     max_bytes: int = 0,
+    chain_addons: Optional[List[str]] = None,
 ):
     """Entry point used by the CLI: build and write or print the span."""
     context = build_span_context(
@@ -121,6 +142,7 @@ def dump_span_context(
         analysis_root,
         max_bytes_per_step=max_bytes_per_step,
         max_bytes=max_bytes,
+        chain_addons=chain_addons,
     )
     if stdout:
         print(context)

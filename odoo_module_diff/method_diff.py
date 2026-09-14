@@ -177,14 +177,11 @@ def build_commit_map_from_repo(
     )
     commit_map: Dict[str, List[str]] = {}
     for c in reversed(commits):  # Chronological order
-        pr = ""
-        for line in c.message.splitlines():
-            if " odoo/odoo#" in line:
-                pr = f"https://github.com/odoo/odoo/pull/{line.split(' odoo/odoo#')[1].strip()}"
         c_sha = c.hexsha[:10]
-        author = c.author.name
         summary = c.message.splitlines()[0]
-        comment_line = f"# Commit: {c_sha} | PR: {pr} | {author} | {summary}"
+        # keep it terse: only the sha1 and the commit message (PR links
+        # and authors cost tokens without adding migration information)
+        comment_line = f"# Commit: {c_sha} | {summary}"
 
         for parent in c.parents:
             try:

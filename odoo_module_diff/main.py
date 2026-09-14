@@ -1638,7 +1638,8 @@ def main(
         # multi-serie span mode (Point E): one context section per serie
         # step; --from-serie defaults to --to-serie - 1 (a single step,
         # same output as the plain context dump but read from the cache
-        # without any git repo)
+        # without any git repo). --with-dependencies extends the context
+        # to the dependency chain of the addon.
         if to_serie and not from_serie:
             from_serie = to_serie - 1
         if not (from_serie and to_serie) or to_serie <= from_serie:
@@ -1650,6 +1651,14 @@ def main(
             )
             exit(1)
         analysis_root = from_analysis or analysis_home()
+        chain_addons = None
+        if with_dependencies:
+            deps_addons_path = find_addons_paths(
+                int(to_serie), fs_dir=repo_path or ""
+            )
+            chain_addons = resolve_dependencies(
+                int(to_serie), deps_addons_path, addon
+            )
         dump_span_context(
             addon,
             int(from_serie),
@@ -1659,6 +1668,7 @@ def main(
             stdout=stdout,
             max_bytes_per_step=max_bytes_per_step,
             max_bytes=max_bytes,
+            chain_addons=chain_addons,
         )
         return
 
