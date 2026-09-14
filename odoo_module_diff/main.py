@@ -1503,6 +1503,11 @@ def main(
         " README.md summaries of the top 30 addons.",
     ),
 ):
+    # tolerate a single positional serie (`odoo-module-diff 19`): it
+    # lands in repo_path because the serie is the second positional
+    if repo_path and not target_serie and re.fullmatch(r"\d+", repo_path):
+        target_serie = float(repo_path)
+        repo_path = ""
     target_serie = int(target_serie)  # (float this allows .0)
 
     if addon and (odoo_cfg or addons_path_opt):
@@ -1514,29 +1519,42 @@ def main(
 
         found = locate_external_addon(addon, odoo_cfg, addons_path_opt)
         if not found:
+            # core addon (or unknown): fall back transparently to the
+            # regular serie scan path below, inferring the odoo repo from
+            # the config location (~/DEV/odooNN/odoo.cfg -> ../odoo/src)
             print(
-                f"Error! Addon {addon} not found in the addons paths (or"
-                " it is a core addon: analyse it without --odoo-cfg)."
+                f"NOTE! Addon {addon} not found in the addons paths:"
+                " it is a core addon (or an unknown addon), continuing"
+                " with the regular serie analysis."
             )
-            exit(1)
-        if not dump_context and not stdout:
+            if not repo_path and odoo_cfg:
+                cfg_dir = Path(odoo_cfg).expanduser().resolve().parent
+                for candidate in (cfg_dir / "odoo" / "src", cfg_dir / "src"):
+                    if (candidate / "addons").is_dir():
+                        repo_path = str(candidate)
+                        print(f"NOTE! Using the odoo repo at {repo_path}.")
+                        break
+        elif not dump_context and not stdout:
             print(
                 "Error! External addon analysis requires --dump-context"
                 " (or --stdout): the milestone context is built on the"
                 " fly and must be dumped somewhere."
             )
             exit(1)
-        from odoo_module_diff.external_milestones import dump_external_context
+        else:
+            from odoo_module_diff.external_milestones import (
+                dump_external_context,
+            )
 
-        dump_external_context(
-            addon,
-            odoo_cfg=odoo_cfg,
-            addons_path_str=addons_path_opt,
-            target_serie=target_serie,
-            output_file=output_file,
-            stdout=stdout,
-        )
-        return
+            dump_external_context(
+                addon,
+                odoo_cfg=odoo_cfg,
+                addons_path_str=addons_path_opt,
+                target_serie=target_serie,
+                output_file=output_file,
+                stdout=stdout,
+            )
+            return
 
     if addon_readme or addon_readmes:
         # standalone per addon README mode: aggregate from the analysis
@@ -1607,19 +1625,28 @@ def main(
             )
             exit(1)
 
-    if not target_serie and not (from_analysis or (from_serie and to_serie)):
+    if not target_serie and not (
+        from_analysis or from_serie or to_serie
+    ):
         print(
             "Error! Pass the target serie positionally (e.g. 19), or"
-            " --from-serie/--to-serie, or --from-analysis."
+            " --to-serie, or --from-analysis."
         )
         exit(1)
 
     if (from_serie or to_serie) and addon:
-        # multi-serie span mode (Point E): one context section per serie step
+        # multi-serie span mode (Point E): one context section per serie
+        # step; --from-serie defaults to --to-serie - 1 (a single step,
+        # same output as the plain context dump but read from the cache
+        # without any git repo)
+        if to_serie and not from_serie:
+            from_serie = to_serie - 1
         if not (from_serie and to_serie) or to_serie <= from_serie:
             print(
                 "Error! Pass both --from-serie and --to-serie with"
-                " --to-serie greater than --from-serie."
+                " --to-serie greater than --from-serie (or just"
+                " --to-serie: --from-serie then defaults to"
+                " --to-serie - 1)."
             )
             exit(1)
         analysis_root = from_analysis or analysis_home()

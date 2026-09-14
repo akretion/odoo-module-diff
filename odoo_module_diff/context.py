@@ -8,7 +8,7 @@ signature deltas and the dependency tree) instead of browsing many files.
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 CONTEXT_FILENAME = "migration_context.md"
 METHODS_FILENAME = "method_signatures.patch"
@@ -25,19 +25,28 @@ def discover_addons(analysis_dir: str) -> List[str]:
     return addons
 
 
-def _rank(filepath: Path) -> int:
-    """method signatures first, structural patches then, noise last."""
+def _rank(filepath: Path) -> Tuple[int, str]:
+    """README summary first, structural patches then, method signatures
+    last, noise at the very end."""
+    if filepath.name == "README.md":
+        return (0, filepath.name)
     if filepath.name == METHODS_FILENAME:
-        return 0
+        return (3, filepath.name)
     if filepath.name.startswith("__"):
-        return 2
-    return 1
+        return (4, filepath.name)
+    return (2, filepath.name)
 
 
 def _addon_files(addon_dir: Path) -> List[Path]:
-    files = sorted(addon_dir.glob("*.patch"), key=lambda p: (_rank(p), p.name))
+    files = [
+        f
+        for f in sorted(addon_dir.glob("*"), key=_rank)
+        if f.is_file()
+        and (f.suffix == ".patch" or f.name in ("README.md", DEPS_FILENAME))
+    ]
+    files.sort(key=_rank)
     deps = addon_dir / DEPS_FILENAME
-    if deps.exists():
+    if deps.exists() and deps not in files:
         files.append(deps)
     return files
 
@@ -60,6 +69,16 @@ def build_context(
             f"- Generated: {datetime.now().isoformat(timespec='seconds')}",
             "- Source: odoo-module-diff pseudo patches (structural commits,"
             " method signature deltas, dependency trees)",
+            "",
+            "> **NOTICE:** this is an extraction of the main breaking",
+            "> changes pseudo commits done between the 2 Odoo series. But",
+            "> these commits only show the intent of each change. They",
+            "> should be used to detect possible migration issues. Once",
+            "> migration issues are detected, the real Odoo code base",
+            "> should be used as the real code reference to ensure the",
+            "> correctness of the changes: such a migration pseudo commit",
+            "> might be followed by many small fix commits that change the",
+            "> final diff between the Odoo series.",
             "",
             "## Contents",
             "",
@@ -107,11 +126,21 @@ def build_context(
             _SEPARATOR,
             "",
         ]
+        signatures_notice_shown = False
         for filepath in files:
             size = filepath.stat().st_size
             if max_bytes and used + size > max_bytes:
                 skipped.append(f"{addon}/{filepath.name} ({size} bytes)")
                 continue
+            if filepath.name == METHODS_FILENAME and not signatures_notice_shown:
+                signatures_notice_shown = True
+                lines += [
+                    "Finally, here is a pseudo diff of the signature",
+                    "changes of the module between the origin and target",
+                    "series, with the sha1 of each commit that",
+                    "participated to the change:",
+                    "",
+                ]
             content = filepath.read_text(errors="ignore")
             used += size
             lines += [
