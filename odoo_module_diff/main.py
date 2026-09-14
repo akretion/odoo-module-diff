@@ -1669,6 +1669,10 @@ def main(
             max_bytes_per_step=max_bytes_per_step,
             max_bytes=max_bytes,
             chain_addons=chain_addons,
+            # no core repo scan in context mode: missing core addons are
+            # reported as such (only OCA repos could be scanned on demand
+            # and they are not part of the core chain)
+            allow_ondemand_scan=False,
         )
         return
 

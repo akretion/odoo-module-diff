@@ -28,6 +28,7 @@ def build_span_context(
     max_bytes: int = 0,
     header: bool = True,
     chain_addons: List[str] | None = None,
+    allow_ondemand_scan: bool = True,
 ) -> str:
     """Build the multi-serie context: one section per serie step.
     `analysis_root` holds one `<serie>.0/` subdir per serie.
@@ -37,15 +38,30 @@ def build_span_context(
 
     addons = chain_addons or [addon]
     missing_scans = []
-    for target_serie in serie_range(from_serie, to_serie):
-        analysis_dir = Path(analysis_root) / f"{target_serie}.0"
-        for chain_addon in addons:
-            addon_dir = analysis_dir / chain_addon
-            if not addon_dir.is_dir() or not any(addon_dir.glob("*.patch")):
-                scanned = scan_serie_addon(
-                    target_serie, chain_addon, str(analysis_dir)
-                )
-                if not scanned:
+    if allow_ondemand_scan:
+        for target_serie in serie_range(from_serie, to_serie):
+            analysis_dir = Path(analysis_root) / f"{target_serie}.0"
+            for chain_addon in addons:
+                addon_dir = analysis_dir / chain_addon
+                if not addon_dir.is_dir() or not any(
+                    addon_dir.glob("*.patch")
+                ):
+                    scanned = scan_serie_addon(
+                        target_serie, chain_addon, str(analysis_dir)
+                    )
+                    if not scanned:
+                        missing_scans.append((target_serie, chain_addon))
+    else:
+        # cache-only mode: missing core addon analyses are not scanned
+        # (scanning the whole odoo.git serie is extremely slow); they are
+        # simply reported as missing in the context
+        for target_serie in serie_range(from_serie, to_serie):
+            analysis_dir = Path(analysis_root) / f"{target_serie}.0"
+            for chain_addon in addons:
+                addon_dir = analysis_dir / chain_addon
+                if not addon_dir.is_dir() or not any(
+                    addon_dir.glob("*.patch")
+                ):
                     missing_scans.append((target_serie, chain_addon))
 
     lines = []
@@ -133,6 +149,7 @@ def dump_span_context(
     max_bytes_per_step: int = 0,
     max_bytes: int = 0,
     chain_addons: Optional[List[str]] = None,
+    allow_ondemand_scan: bool = True,
 ):
     """Entry point used by the CLI: build and write or print the span."""
     context = build_span_context(
@@ -143,6 +160,7 @@ def dump_span_context(
         max_bytes_per_step=max_bytes_per_step,
         max_bytes=max_bytes,
         chain_addons=chain_addons,
+        allow_ondemand_scan=allow_ondemand_scan,
     )
     if stdout:
         print(context)
