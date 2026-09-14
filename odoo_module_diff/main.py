@@ -1445,8 +1445,19 @@ def main(
     dump_methods: bool = True,
     bypass_structural_scan: bool = False,
     from_analysis: str = "",
-    dump_context: bool = False,
-    output_file: str = "",
+    dump_context: bool = typer.Option(
+        False,
+        "--dump-context",
+        "-d",
+        help="Dump an aggregated migration context (from the analysis"
+        " cache when combined with --to-serie/--from-analysis, or after"
+        " a fresh scan).",
+    ),
+    output_file: str = typer.Option(
+        "",
+        "--output-file",
+        "-o",
+    ),
     stdout: bool = False,
     max_bytes: int = 0,
     with_dependencies: bool = False,
@@ -1508,6 +1519,15 @@ def main(
     if repo_path and not target_serie and re.fullmatch(r"\d+", repo_path):
         target_serie = float(repo_path)
         repo_path = ""
+    if target_serie and not repo_path:
+        # infer the odoo repo from the serie env layout
+        # ($ODOO_PARENT_HOME/odoo<serie>/odoo/src worktree)
+        _parent = Path(
+            os.environ.get("ODOO_PARENT_HOME", str(Path.home() / "DEV"))
+        ).expanduser()
+        _src = _parent / f"odoo{int(target_serie)}" / "odoo" / "src"
+        if (_src / "addons").is_dir():
+            repo_path = str(_src)
     target_serie = int(target_serie)  # (float this allows .0)
 
     if addon and (odoo_cfg or addons_path_opt):
@@ -1634,14 +1654,20 @@ def main(
         )
         exit(1)
 
-    if (from_serie or to_serie) and addon:
+    if (from_serie or to_serie or (dump_context and target_serie)) and addon:
         # multi-serie span mode (Point E): one context section per serie
         # step; --from-serie defaults to --to-serie - 1 (a single step,
         # same output as the plain context dump but read from the cache
         # without any git repo). --with-dependencies extends the context
         # to the dependency chain of the addon.
+        if target_serie and to_serie == 0:
+            to_serie = target_serie
         if to_serie and not from_serie:
             from_serie = to_serie - 1
+        if to_serie == 0 and target_serie > from_serie:
+            # the serie was passed positionally (shifted into
+            # target_serie): treat it as the to-serie
+            to_serie = target_serie
         if not (from_serie and to_serie) or to_serie <= from_serie:
             print(
                 "Error! Pass both --from-serie and --to-serie with"
@@ -1653,6 +1679,7 @@ def main(
         analysis_root = from_analysis or analysis_home()
         chain_addons = None
         if with_dependencies:
+            # fs_dir="" lets find_addons_paths use $ODOO_PARENT_HOME
             deps_addons_path = find_addons_paths(
                 int(to_serie), fs_dir=repo_path or ""
             )
