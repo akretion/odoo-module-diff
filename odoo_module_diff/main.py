@@ -1107,9 +1107,14 @@ def scan(
             end_commit = repo.commit(target_rev)
             end_found = False
         else:
-            end_commit, end_found = find_end_commit_by_serie(
-                repo, target_serie, target_rev
-            )
+            # Keep the [REL] lookup only to know whether the serie is
+            # released (the manifestoo serie label), but scan up to the
+            # branch TIP: the serie branch keeps receiving data-model
+            # changes after [REL] (e.g. the "round globally" tax rework
+            # landed on 18.0 after [REL] 18.0) and a migration targets
+            # the latest tip, not the release milestone.
+            _, end_found = find_end_commit_by_serie(repo, target_serie, target_rev)
+            end_commit = repo.commit(target_rev)
         end_date = datetime.fromtimestamp(end_commit.committed_date).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
@@ -1437,7 +1442,7 @@ def main(
         0, help="Target serie, e.g. 20 for the 20.0/master serie."
     ),
     addon: str = "",
-    output_dir: str = "module_diff_analysis",
+    output_dir: str = "",
     wrap_serie_dir: bool = True,
     dump_dependencies: bool = False,
     keep_noise: bool = False,
@@ -1529,6 +1534,11 @@ def main(
         if (_src / "addons").is_dir():
             repo_path = str(_src)
     target_serie = int(target_serie)  # (float this allows .0)
+
+    if not output_dir:
+        # default the scan output to the analysis home (respecting
+        # $ODOO_MODULE_DIFF_HOME), not a CWD-relative module_diff_analysis/
+        output_dir = analysis_home()
 
     if addon and (odoo_cfg or addons_path_opt):
         # external addon mode: locate the OCA / custom addon through the
