@@ -1,6 +1,6 @@
 import ast
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import git
 
@@ -127,24 +127,29 @@ class MethodVisitor(ast.NodeVisitor):
             }
 
 
-def extract_methods_from_commit(
-    commit: git.Commit,
-    addon: str,
-    module_prefix: str = "addons/",
-) -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """Extract all method signatures across all python model files in an addon at a specific commit, grouped by Odoo model ID."""
+def addon_model_paths(
+    addon: str, module_prefix: str = "addons/", include_wizards: bool = False
+) -> List[str]:
+    """Git paths holding the python model code of an addon: ``models/``
+    always, plus the wizard dirs (both spellings exist in the wild)
+    when ``include_wizards`` is set (external addons, where the wizard
+    code matters as much as the models)."""
     if addon == "base" and module_prefix == "addons/":
-        path = "odoo/addons/base/models"
+        base = "odoo/addons/base"
     else:
-        path = f"{module_prefix}{addon}/models"
-    try:
-        tree = commit.tree
-        for part in path.split("/"):
-            tree = tree[part]
-    except KeyError:
-        return {}
+        base = f"{module_prefix}{addon}"
+    paths = [f"{base}/models"]
+    if include_wizards:
+        paths += [f"{base}/wizard", f"{base}/wizards"]
+    return paths
 
-    blobs = get_py_blobs(tree)
+
+def extract_methods_from_blobs(
+    blobs: Dict[str, str],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Extract the method signatures of a {path: code} map, grouped by
+    Odoo model ID (same grouping as extract_methods_from_commit, but
+    source agnostic: works for git blobs and for files read from disk)."""
     models: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for filepath, code in blobs.items():
         try:
@@ -158,6 +163,25 @@ def extract_methods_from_commit(
         except Exception:
             pass
     return models
+
+
+def extract_methods_from_commit(
+    commit: git.Commit,
+    addon: str,
+    module_prefix: str = "addons/",
+    include_wizards: bool = False,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Extract all method signatures across all python model files in an addon at a specific commit, grouped by Odoo model ID."""
+    blobs: Dict[str, str] = {}
+    for path in addon_model_paths(addon, module_prefix, include_wizards):
+        try:
+            tree = commit.tree
+            for part in path.split("/"):
+                tree = tree[part]
+        except KeyError:
+            continue
+        blobs.update(get_py_blobs(tree))
+    return extract_methods_from_blobs(blobs)
 
 
 def build_commit_map_from_repo(
@@ -205,50 +229,22 @@ def build_commit_map_from_repo(
     return commit_map
 
 
-def generate_method_signatures_diff(
-    repo: git.Repo,
-    addon: str,
-    start_commit: git.Commit,
-    end_commit: git.Commit,
-    output_module_dir: str,
-    commit_items: Optional[List[Dict[str, Any]]] = None,
-    module_prefix: str = "addons/",
-    annotate_commits: bool = True,
-    annotate_start: Optional[git.Commit] = None,
-    serie_start: Optional[git.Commit] = None,
-):
-    """
-    Generates method_signatures.patch for the given addon between start_commit and end_commit.
-    Methods are grouped by Odoo model ID (_name / _inherit).
-    Move-invariant: methods moved without signature change are ignored.
-    `annotate_start` optionally restricts the costly commit annotation
-    lookup to a smaller window (e.g. resume..tip in --continue mode).
-    `serie_start` optionally overrides the start commit of the signature
-    delta itself (e.g. the serie merge base in --continue mode, while
-    start_commit holds the resume commit for the structural scan).
-    """
-    print(f"Extracting method signatures for {addon} at start/end commits...")
-    methods_start = extract_methods_from_commit(
-        serie_start or start_commit, addon, module_prefix
-    )
-    methods_end = extract_methods_from_commit(end_commit, addon, module_prefix)
-
+def diff_method_models(
+    methods_start: Dict[str, Dict[str, Dict[str, Any]]],
+    methods_end: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Tuple[Dict[str, Dict[str, Any]], int, int, int]:
+    """Diff two extracted method model maps. Returns (diff_data,
+    total_added, total_removed, total_changed) where diff_data is
+    grouped by Odoo model ID."""
+    diff_data: Dict[str, Dict[str, Any]] = {}
+    total_added = total_removed = total_changed = 0
     all_models = sorted(set(methods_start.keys()) | set(methods_end.keys()))
-    diff_data = {}
-    total_added = 0
-    total_removed = 0
-    total_changed = 0
-
     for model_id in all_models:
         m_start = methods_start.get(model_id, {})
         m_end = methods_end.get(model_id, {})
 
-        added = []
-        removed = []
-        changed = []
-
-        all_methods = sorted(set(m_start.keys()) | set(m_end.keys()))
-        for m in all_methods:
+        added, removed, changed = [], [], []
+        for m in sorted(set(m_start.keys()) | set(m_end.keys())):
             s = m_start.get(m)
             e = m_end.get(m)
             if s and not e:
@@ -267,6 +263,105 @@ def generate_method_signatures_diff(
             total_added += len(added)
             total_removed += len(removed)
             total_changed += len(changed)
+    return diff_data, total_added, total_removed, total_changed
+
+
+def method_signatures_text(
+    addon: str,
+    diff_data: Dict[str, Dict[str, Any]],
+    totals: Tuple[int, int, int],
+    commit_map: Optional[Dict[str, List[str]]] = None,
+    skipped_annotation_note: bool = False,
+) -> str:
+    """The method_signatures.patch content as a string."""
+    total_added, total_removed, total_changed = totals
+    commit_map = commit_map or {}
+    lines = [
+        f"# Method Signatures Delta: {addon}",
+        f"# Summary: {total_changed} modified, {total_added} added,"
+        f" {total_removed} removed",
+        "",
+    ]
+    if skipped_annotation_note:
+        lines += [
+            "# (commit annotations skipped: no structural commit kept"
+            " in this transition)",
+            "",
+        ]
+    for model_id, data in diff_data.items():
+        lines.append(f"[{model_id}]")
+        for mname, orig_sig, new_sig in data["changed"]:
+            lines += commit_map.get(mname, [])
+            lines += [f"- {orig_sig}", f"+ {new_sig}", ""]
+        for mname, sig in data["removed"]:
+            lines += commit_map.get(mname, [])
+            lines += [f"- {sig}", ""]
+        for mname, sig in data["added"]:
+            lines += commit_map.get(mname, [])
+            lines += [f"+ {sig}", ""]
+    return "\n".join(lines)
+
+
+def write_method_signatures_patch(
+    addon: str,
+    diff_data: Dict[str, Dict[str, Any]],
+    totals: Tuple[int, int, int],
+    output_module_dir: str,
+    commit_map: Optional[Dict[str, List[str]]] = None,
+    skipped_annotation_note: bool = False,
+) -> str:
+    """Write the method_signatures.patch file; returns its path."""
+    os.makedirs(output_module_dir, exist_ok=True)
+    out_filepath = os.path.join(output_module_dir, "method_signatures.patch")
+    with open(out_filepath, "w") as f:
+        f.write(
+            method_signatures_text(
+                addon,
+                diff_data,
+                totals,
+                commit_map=commit_map,
+                skipped_annotation_note=skipped_annotation_note,
+            )
+        )
+    return out_filepath
+
+
+def generate_method_signatures_diff(
+    repo: git.Repo,
+    addon: str,
+    start_commit: git.Commit,
+    end_commit: git.Commit,
+    output_module_dir: str,
+    commit_items: Optional[List[Dict[str, Any]]] = None,
+    module_prefix: str = "addons/",
+    annotate_commits: bool = True,
+    annotate_start: Optional[git.Commit] = None,
+    serie_start: Optional[git.Commit] = None,
+    include_wizards: bool = False,
+):
+    """
+    Generates method_signatures.patch for the given addon between start_commit and end_commit.
+    Methods are grouped by Odoo model ID (_name / _inherit).
+    Move-invariant: methods moved without signature change are ignored.
+    `annotate_start` optionally restricts the costly commit annotation
+    lookup to a smaller window (e.g. resume..tip in --continue mode).
+    `serie_start` optionally overrides the start commit of the signature
+    delta itself (e.g. the serie merge base in --continue mode, while
+    start_commit holds the resume commit for the structural scan).
+    `include_wizards` also scans the wizard/wizards dirs (external
+    addons).
+    """
+    print(f"Extracting method signatures for {addon} at start/end commits...")
+    methods_start = extract_methods_from_commit(
+        serie_start or start_commit, addon, module_prefix, include_wizards
+    )
+    methods_end = extract_methods_from_commit(
+        end_commit, addon, module_prefix, include_wizards
+    )
+
+    diff_data, total_added, total_removed, total_changed = diff_method_models(
+        methods_start, methods_end
+    )
 
     if not diff_data:
         print(f"No method signature changes found for addon {addon}.")
@@ -287,41 +382,14 @@ def generate_method_signatures_diff(
         )
         commit_map = {}
 
-    os.makedirs(output_module_dir, exist_ok=True)
-    out_filepath = os.path.join(output_module_dir, "method_signatures.patch")
-
-    with open(out_filepath, "w") as f:
-        f.write(f"# Method Signatures Delta: {addon}\n")
-        f.write(
-            f"# Summary: {total_changed} modified, {total_added} added, {total_removed} removed\n\n"
-        )
-        if not annotate_commits:
-            f.write(
-                "# (commit annotations skipped: no structural commit kept"
-                " in this transition)\n\n"
-            )
-
-        for model_id, data in diff_data.items():
-            f.write(f"[{model_id}]\n")
-            for mname, orig_sig, new_sig in data["changed"]:
-                cmts = commit_map.get(mname, [])
-                for cmt in cmts:
-                    f.write(f"{cmt}\n")
-                f.write(f"- {orig_sig}\n")
-                f.write(f"+ {new_sig}\n\n")
-
-            for mname, sig in data["removed"]:
-                cmts = commit_map.get(mname, [])
-                for cmt in cmts:
-                    f.write(f"{cmt}\n")
-                f.write(f"- {sig}\n\n")
-
-            for mname, sig in data["added"]:
-                cmts = commit_map.get(mname, [])
-                for cmt in cmts:
-                    f.write(f"{cmt}\n")
-                f.write(f"+ {sig}\n\n")
-
+    out_filepath = write_method_signatures_patch(
+        addon,
+        diff_data,
+        (total_added, total_removed, total_changed),
+        output_module_dir,
+        commit_map=commit_map,
+        skipped_annotation_note=not annotate_commits,
+    )
     print(
         f"Generated {out_filepath} ({total_changed} changed, {total_added} added, {total_removed} removed)"
     )

@@ -15,6 +15,8 @@ from typing import Dict, List, Optional, Tuple
 
 import git
 
+from odoo_module_diff.external_locate import odoo_parent_home
+
 # manifestoo only knows released series (last supported one):
 MAX_MANIFESTOO_SERIE = 19
 
@@ -38,9 +40,7 @@ def find_external_repo(
             # the given dir is a git repo itself but not an odoo src dir:
             # fall through to the env lookup below
             pass
-        parent_home = Path(
-            os.environ.get("ODOO_PARENT_HOME", str(Path.home() / "DEV"))
-        ).expanduser()
+        parent_home = odoo_parent_home()
         env_src = parent_home / f"odoo{target_serie}" / "odoo" / "src"
         if (env_src / "addons").is_dir():
             candidates.append(env_src.parent / "external-src")

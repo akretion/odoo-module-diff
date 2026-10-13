@@ -6,7 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import git
 import typer
@@ -47,6 +47,9 @@ ADDON_PREFIX_FILTER = ["l10n_", "website_", "test"]
 ANALYSIS_HOME_URL = "https://github.com/akretion/odoo-module-diff-analysis"
 
 
+_ANALYSIS_HOME_WARNED = False
+
+
 def analysis_home(explicit: str = "") -> str:
     """Root dir holding the per-serie analysis dirs (<home>/<serie>.0/).
 
@@ -59,9 +62,10 @@ def analysis_home(explicit: str = "") -> str:
     Scanning all the Odoo commits from scratch is extremely slow, so the
     pseudo patches of every serie are meant to be shared through the
     odoo-module-diff-analysis project: when no local analysis home is
-    configured a warning suggests cloning it and setting
-    ODOO_MODULE_DIFF_HOME before the default location is used.
+    configured a warning (printed once per run) suggests cloning it and
+    setting ODOO_MODULE_DIFF_HOME before the default location is used.
     """
+    global _ANALYSIS_HOME_WARNED
     if explicit:
         return str(Path(explicit).expanduser())
     env_home = os.environ.get("ODOO_MODULE_DIFF_HOME") or os.environ.get(
@@ -69,26 +73,31 @@ def analysis_home(explicit: str = "") -> str:
     )
     if env_home:
         home = Path(env_home).expanduser()
-        if not home.is_dir():
+        if not home.is_dir() and not _ANALYSIS_HOME_WARNED:
+            _ANALYSIS_HOME_WARNED = True
             print(
                 f"WARNING! The configured analysis home {home}"
                 " (ODOO_MODULE_DIFF_HOME) does not exist or is not a"
                 " directory: scans and cache modes will find nothing"
                 f" there. Clone {ANALYSIS_HOME_URL} to that location (or"
                 " fix the variable) unless you really want to rescan the"
-                " Odoo commits from scratch."
+                " Odoo commits from scratch.",
+                file=sys.stderr,
             )
         return str(home)
     default = str(Path.home() / "DEV" / "odoo-module-diff-analysis")
-    print(
-        "WARNING! No analysis home configured ($ODOO_MODULE_DIFF_HOME is"
-        f" not set): using the default {default}. Scanning every Odoo"
-        " commit from scratch is extremely slow: the pseudo patches of"
-        " all the series are shared through"
-        f" {ANALYSIS_HOME_URL}; clone it locally once (e.g. into"
-        " ~/DEV/odoo-module-diff-analysis) and point"
-        " ODOO_MODULE_DIFF_HOME at the clone."
-    )
+    if not _ANALYSIS_HOME_WARNED:
+        _ANALYSIS_HOME_WARNED = True
+        print(
+            "WARNING! No analysis home configured ($ODOO_MODULE_DIFF_HOME is"
+            f" not set): using the default {default}. Scanning every Odoo"
+            " commit from scratch is extremely slow: the pseudo patches of"
+            " all the series are shared through"
+            f" {ANALYSIS_HOME_URL}; clone it locally once (e.g. into"
+            " ~/DEV/odoo-module-diff-analysis) and point"
+            " ODOO_MODULE_DIFF_HOME at the clone.",
+            file=sys.stderr,
+        )
     return default
 
 
@@ -1518,19 +1527,51 @@ def main(
         help="On a whole serie scan, do not generate the per addon"
         " README.md summaries of the top 30 addons.",
     ),
+    plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Emit a JSON migration plan for --addon (one serie step:"
+        " topological dependency closure with per-dependency"
+        " classification, target-serie status, diff dirs and candidate"
+        " OCA migration PRs).",
+    ),
+    origin_addons_path: str = typer.Option(
+        "",
+        "--origin-addons-path",
+        help="Directory holding the ORIGIN code of external addons as it"
+        " should be diffed (used as-is, no branch fetch): for modules"
+        " that moved repos or when an older version than the origin"
+        " serie tip is the reference.",
+    ),
+    no_pr_check: bool = typer.Option(
+        False,
+        "--no-pr-check",
+        help="With --plan: skip the GitHub lookup of candidate OCA"
+        " migration PRs (offline runs).",
+    ),
 ):
     # tolerate a single positional serie (`odoo-module-diff 19`): it
     # lands in repo_path because the serie is the second positional
     if repo_path and not target_serie and re.fullmatch(r"\d+", repo_path):
         target_serie = float(repo_path)
         repo_path = ""
+    if repo_path and not addon and Path(repo_path).name == repo_path:
+        # a bare addon name was passed positionally (the repo_path is
+        # the FIRST positional): fail with a hint instead of crashing
+        # on NoSuchPathError. Real repo paths contain a separator.
+        print(
+            f"Error! '{repo_path}' looks like an addon name, not a path:"
+            " the addon is passed with --addon, e.g."
+            f" odoo-module-diff --addon {repo_path} --odoo-cfg <cfg>"
+            " <serie>."
+        )
+        exit(1)
     if target_serie and not repo_path:
         # infer the odoo repo from the serie env layout
         # ($ODOO_PARENT_HOME/odoo<serie>/odoo/src worktree)
-        _parent = Path(
-            os.environ.get("ODOO_PARENT_HOME", str(Path.home() / "DEV"))
-        ).expanduser()
-        _src = _parent / f"odoo{int(target_serie)}" / "odoo" / "src"
+        from odoo_module_diff.external_locate import odoo_parent_home
+
+        _src = odoo_parent_home() / f"odoo{int(target_serie)}" / "odoo" / "src"
         if (_src / "addons").is_dir():
             repo_path = str(_src)
     target_serie = int(target_serie)  # (float this allows .0)
@@ -1540,12 +1581,94 @@ def main(
         # $ODOO_MODULE_DIFF_HOME), not a CWD-relative module_diff_analysis/
         output_dir = analysis_home()
 
-    if addon and (odoo_cfg or addons_path_opt):
+    if plan:
+        # migration planning mode: one serie step (to_serie is the
+        # positional target serie; from_serie defaults to the previous
+        # one). Emits the JSON plan and exits.
+        if not addon:
+            print("Error! --plan requires --addon.")
+            exit(1)
+        if not target_serie:
+            print("Error! --plan requires the target serie (positional).")
+            exit(1)
+        if not odoo_cfg and not addons_path_opt:
+            # no env given: auto-detect the env holding the addon, so
+            # the first command of a migration works without knowing
+            # which odoo.cfg to point at
+            from odoo_module_diff.external_locate import (
+                find_env_cfg_for_addon,
+                odoo_parent_home,
+            )
+
+            near = int(from_serie) if from_serie else target_serie - 1
+            found_cfg = find_env_cfg_for_addon(addon, near_serie=near)
+            if found_cfg is None:
+                # core addon (or no external clone on disk): the env of
+                # the origin serie is the natural addons path
+                env_cfg = odoo_parent_home() / f"odoo{near}" / "odoo.cfg"
+                if env_cfg.is_file():
+                    found_cfg = env_cfg
+            if found_cfg:
+                odoo_cfg = str(found_cfg)
+                print(
+                    f"NOTE! --odoo-cfg not given: using {odoo_cfg}",
+                    file=sys.stderr,
+                )
+        from odoo_module_diff.plan import dump_plan
+
+        plan_kwargs: Dict[str, Any] = dict(
+            addon=addon,
+            from_serie=int(from_serie) if from_serie else target_serie - 1,
+            to_serie=target_serie,
+            odoo_cfg=odoo_cfg,
+            addons_path_str=addons_path_opt,
+            origin_addons_path=origin_addons_path,
+            analysis_root=from_analysis or output_dir,
+            output_file=output_file,
+            stdout=stdout,
+            check_prs=not no_pr_check,
+        )
+        if stdout or not output_file:
+            # the JSON goes to stdout: keep the progress logs on stderr
+            import contextlib
+
+            with contextlib.redirect_stdout(sys.stderr):
+                payload = dump_plan(**plan_kwargs)
+            if payload is not None:
+                print(payload)
+        else:
+            dump_plan(**plan_kwargs)
+        return
+
+    auto_cfg = ""
+    if addon and not odoo_cfg and not addons_path_opt:
+        # no env given: auto-detect the env holding the addon, so the
+        # first command of a migration works without knowing which
+        # odoo.cfg to point at (core addons are not in any external
+        # root: they keep the regular serie analysis path)
+        from odoo_module_diff.external_locate import find_env_cfg_for_addon
+
+        found_cfg = find_env_cfg_for_addon(
+            addon,
+            near_serie=int(from_serie) if from_serie else target_serie - 1,
+        )
+        if found_cfg:
+            auto_cfg = str(found_cfg)
+            print(
+                f"NOTE! No addons path given: using the env holding"
+                f" {addon}: {auto_cfg}",
+                file=sys.stderr,
+            )
+
+    if addon and (odoo_cfg or addons_path_opt or auto_cfg):
         # external addon mode: locate the OCA / custom addon through the
         # addons paths and analyse its milestones on the fly (PR based).
         # The result is a dumped context, so --dump-context/--stdout is
         # required.
         from odoo_module_diff.external_locate import locate_external_addon
+
+        if not odoo_cfg:
+            odoo_cfg = auto_cfg
 
         found = locate_external_addon(addon, odoo_cfg, addons_path_opt)
         if not found:
@@ -1572,18 +1695,29 @@ def main(
             )
             exit(1)
         else:
+            import contextlib
+
             from odoo_module_diff.external_milestones import (
                 dump_external_context,
             )
 
-            dump_external_context(
-                addon,
+            ext_kwargs: Dict[str, Any] = dict(
+                addon=addon,
                 odoo_cfg=odoo_cfg,
                 addons_path_str=addons_path_opt,
                 target_serie=target_serie,
                 output_file=output_file,
-                stdout=stdout,
+                from_serie=int(from_serie) if from_serie else 0,
+                with_dependencies=with_dependencies,
             )
+            if stdout:
+                # the context goes to stdout: keep the progress logs on
+                # stderr so the document can be redirected cleanly
+                with contextlib.redirect_stdout(sys.stderr):
+                    payload = dump_external_context(stdout=True, **ext_kwargs)
+                print(payload)
+            else:
+                dump_external_context(stdout=False, **ext_kwargs)
             return
 
     if addon_readme or addon_readmes:

@@ -171,6 +171,16 @@ def _change_commits(
     return commits
 
 
+def _is_ancestor(repo: git.Repo, maybe_ancestor_sha: str, descendant_sha: str) -> bool:
+    """Is the first commit an ancestor of the second? (git
+    merge-base --is-ancestor wrapper, False on any error)"""
+    try:
+        repo.git.merge_base("--is-ancestor", maybe_ancestor_sha, descendant_sha)
+        return True
+    except Exception:
+        return False
+
+
 def milestone_commits(
     repo: git.Repo,
     addon: str,
@@ -182,9 +192,23 @@ def milestone_commits(
     first: manifest version major/minor bumps and migration-script
     commits. Each milestone carries the addon commits accumulated since
     the previous milestone (the merged PR work)."""
-    # walk the manifest commits chronologically with their version
+    # walk the manifest commits chronologically with their version.
+    # Range correction: when the serie branches were recreated with a
+    # copied history (OCA branch rewrites), start_rev..end_rev includes
+    # the whole ancient history of end_rev — restrict the walk to the
+    # actual ancestry difference (same merge-base trick as
+    # _change_commits).
+    base = None
+    try:
+        bases = repo.merge_base(repo.commit(start_rev), repo.commit(end_rev))
+        base = bases[0] if bases else None
+    except Exception:
+        base = None
+    walk_range = (
+        f"{base.hexsha}..{end_rev}" if base else f"{start_rev}..{end_rev}"
+    )
     log = repo.git.log(
-        "--format=%H%x00%s", f"{start_rev}..{end_rev}",
+        "--format=%H%x00%s", walk_range,
         "--reverse", "--", f"{addon}/__manifest__.py",
     )
     version_events: List[Tuple[str, str, Optional[str]]] = []  # (sha, subject, kind)
@@ -207,7 +231,7 @@ def milestone_commits(
     migration_shas = {
         line.split("\x00", 1)[0]
         for line in repo.git.log(
-            "--format=%H%x00%s", f"{start_rev}..{end_rev}", "--reverse",
+            "--format=%H%x00%s", walk_range, "--reverse",
             "--", f"{addon}/migrations/",
         ).splitlines()
         if line.strip()
@@ -219,11 +243,12 @@ def milestone_commits(
         key=lambda sha: repo.commit(sha).committed_date,
     )
     kind_by_sha = {sha: kind for sha, _, kind in version_events}
+    mig_filtered = False
     if target_serie:
         # drop the older-series history (recreated branches carry the
         # whole module history): start at the first commit whose version
-        # serie is the target serie (or whose subject marks the
-        # migration to it)
+        # serie is the target serie, or whose subject marks the
+        # migration to it
         serie_prefix = f"{target_serie}."
         for idx, sha in enumerate(milestone_shas):
             new_version = _manifest_version(repo, sha, addon) or ""
@@ -235,21 +260,58 @@ def milestone_commits(
             )
             if marker or new_version.startswith(serie_prefix):
                 milestone_shas = milestone_shas[idx:]
+                mig_filtered = True
                 break
-        else:
+        if not mig_filtered:
+            # no target-serie version bump found (the [MIG] commit may
+            # keep the old version until the bot bumps it): fall back to
+            # the first [MIG] commit whatever its version
+            for idx, sha in enumerate(milestone_shas):
+                if "[mig]" in str(repo.commit(sha).message).lower():
+                    milestone_shas = milestone_shas[idx:]
+                    mig_filtered = True
+                    break
+        if not mig_filtered:
             milestone_shas = []
+    if mig_filtered and milestone_shas:
+        # drop the milestone candidates that are ANCESTORS of the
+        # slicing ([MIG]) commit: with the batch-merge OCA histories
+        # they can carry the same commit date while belonging to the
+        # older-series side of the slice (version bumps like
+        # 16.0.x after a "Migration to 17.0" subject are the symptom)
+        slice_sha = milestone_shas[0]
+        milestone_shas = [
+            sha
+            for sha in milestone_shas
+            if sha == slice_sha
+            or not _is_ancestor(repo, sha, slice_sha)
+        ]
     milestones: List[Dict] = []
-    prev_milestone_sha = start_rev
+    # when the serie filter sliced the milestones, the relevant change
+    # commits are the ones AFTER the first ([MIG]) milestone commit —
+    # everything before it belongs to the older series
+    prev_milestone_sha = (
+        milestone_shas[0] if mig_filtered and milestone_shas else start_rev
+    )
     prev_version = _manifest_version(repo, start_rev, addon) or "?"
     for sha in milestone_shas:
         is_migration = sha in migration_shas
         kind = "major" if is_migration else kind_by_sha.get(sha, "minor")
         new_version = _manifest_version(repo, sha, addon)
+        bot_bump = (
+            repo.commit(sha).message.splitlines()[0].startswith(_SKIP_PREFIXES)
+            and not is_migration
+        )
         milestone = {
             "sha": sha,
             "subject": repo.commit(sha).message.splitlines()[0],
             "kind": kind,
             "migrations": is_migration,
+            # a [BOT] post-merge version bump carries no addon work
+            # itself (its diffstat is README/manifest only): its
+            # accumulated change commits belong to the previous real
+            # milestone, so the builder folds them there
+            "bot_bump": bot_bump,
         }
         if new_version:
             milestone["version"] = f"{prev_version} -> {new_version}"
@@ -257,8 +319,33 @@ def milestone_commits(
         milestone["change_commits"] = _change_commits(
             repo, addon, prev_milestone_sha, sha
         )
+        # plus the commits strictly after the last milestone (post-MIG
+        # work at the serie tip is the most relevant to the migration)
+        milestone["tail_commits"] = []
+        if bot_bump and milestones and not milestones[-1]["bot_bump"]:
+            # fold into the previous real milestone: it absorbs the
+            # commits up to this bot bump, and the tail below then
+            # covers everything after it (bot bumps are transparent)
+            milestones[-1]["change_commits"] = _change_commits(
+                repo, addon, milestones[-1]["sha"], sha
+            )
+            milestones[-1]["version"] = (
+                milestones[-1]["version"].split(" -> ")[0]
+                + " -> "
+                + (new_version or milestones[-1]["version"].split(" -> ")[-1])
+            )
+            prev_milestone_sha = sha
+            continue
         milestones.append(milestone)
         prev_milestone_sha = sha
+    if milestones:
+        # tail of the last milestone: continue from the LAST bot bump
+        # if one folded after it (or from the milestone itself), up to
+        # the serie tip
+        tail_start = prev_milestone_sha if mig_filtered else milestones[-1]["sha"]
+        milestones[-1]["tail_commits"] = _change_commits(
+            repo, addon, tail_start, end_rev
+        )
     return milestones
 
 
@@ -316,6 +403,18 @@ def build_milestone_context(
         sha = milestone["sha"]
         kind = milestone["kind"]
         title = "MIGRATION" if kind == "major" else "FEATURES"
+        changes = milestone["change_commits"]
+        tail = milestone.get("tail_commits") or []
+        if (
+            not changes
+            and not tail
+            and not milestone.get("migrations")
+            and milestone["subject"].startswith(_SKIP_PREFIXES)
+        ):
+            # [BOT] version-bump anchors with nothing ported since them:
+            # rendering them is pure noise (they still served as
+            # accumulation anchors above)
+            continue
         lines += [
             _SEPARATOR,
             f"## {title}: {milestone['subject']}",
@@ -330,7 +429,6 @@ def build_milestone_context(
                 f"- Touches {addon}/migrations/ (OpenUpgrade scripts"
                 " present: check them for the authoritative rename list)"
             )
-        changes = milestone["change_commits"]
         lines.append(f"- Addon commits since previous milestone: {len(changes)}")
         lines.append("")
 
@@ -357,12 +455,15 @@ def build_milestone_context(
         if stat:
             lines += ["### Milestone commit diffstat", "", "```", stat, "```", ""]
         if changes:
-            shown = changes[:30]
-            lines += [
-                f"### Change commits ({len(changes)} total,"
-                f" showing {len(shown)})",
-                "",
-            ]
+            shown = changes[:50]
+            if len(changes) > len(shown):
+                lines += [
+                    f"### Change commits (showing {len(shown)} of"
+                    f" {len(changes)})",
+                    "",
+                ]
+            else:
+                lines += ["### Change commits", ""]
             for change in shown:
                 line = f"- {change['sha'][:10]} {change['subject']}"
                 if slug and (kind == "major" or len(changes) <= 5):
@@ -373,7 +474,196 @@ def build_milestone_context(
             if len(changes) > len(shown):
                 lines.append(f"- ... and {len(changes) - len(shown)} more")
             lines.append("")
+        if tail:
+            shown = tail[:50]
+            if len(tail) > len(shown):
+                lines += [
+                    f"### Post-milestone commits (serie tip work:"
+                    f" showing {len(shown)} of {len(tail)})",
+                    "",
+                ]
+            else:
+                lines += ["### Post-milestone commits (serie tip work)", ""]
+            for change in shown:
+                lines.append(f"- {change['sha'][:10]} {change['subject']}")
+            if len(tail) > len(shown):
+                lines.append(f"- ... and {len(tail) - len(shown)} more")
+            lines.append("")
     return "\n".join(lines)
+
+
+def _disk_manifest_serie(addon_path: Path) -> int:
+    """The serie (A of A.B.C.D.E) of the manifest version on disk, 0 when
+    unknown: tells whether the local checkout holds the target serie."""
+    try:
+        content = (addon_path / "__manifest__.py").read_text(errors="ignore")
+    except OSError:
+        return 0
+    match = re.search(r"""["']version["']\s*:\s*["'](\d+)\.\d+""", content)
+    return int(match.group(1)) if match else 0
+
+
+def _serie_step_context(
+    addon: str,
+    addon_path: Path,
+    repo: git.Repo,
+    from_serie: int,
+    to_serie: int,
+) -> str:
+    """One serie step (from_serie -> to_serie) of the external addon
+    migration context: milestones + PRs, the [MIG] commits models diff,
+    the sliced tree diff and the method signatures delta."""
+    from odoo_module_diff.external_treediff import (
+        build_tree_diff,
+        mig_commits_code_diff,
+        ref_py_files,
+    )
+    from odoo_module_diff.method_diff import (
+        diff_method_models,
+        extract_methods_from_blobs,
+        method_signatures_text,
+    )
+
+    target_rev = f"{to_serie}.0"
+    prev_rev = f"{from_serie}.0"
+    # resolve the serie branches as origin/<serie>.0 (fetching them when
+    # needed): a bare "<serie>.0" only resolves when the clone happens to
+    # have a LOCAL branch of that name (common in long-lived clones, not
+    # in fresh ones)
+    from odoo_module_diff.external_treediff import _fetch_ref, _resolve_rev
+
+    if not _fetch_ref(repo, target_rev):
+        print(
+            f"WARNING! Branch {target_rev} not available in"
+            f" {repo.working_tree_dir or repo.git_dir}: skipping the"
+            f" {from_serie}.0 -> {to_serie}.0 step"
+            f" (git fetch origin {target_rev} to enable it)."
+        )
+        return ""
+    end_commit = repo.commit(_resolve_rev(repo, target_rev))
+    prev_commit = None
+    if _fetch_ref(repo, prev_rev):
+        prev_commit = repo.commit(_resolve_rev(repo, prev_rev))
+    if prev_commit:
+        merge_base = repo.merge_base(prev_commit, end_commit)
+        # on recreated branches there is no merge base: fall back to the
+        # previous serie tip; the serie filter in milestone_commits drops
+        # the older-series history it carries
+        start_commit = merge_base[0] if merge_base else prev_commit
+    else:
+        print(
+            f"WARNING! Branch {prev_rev} not fetched in the addon repo:"
+            f" analysing the whole {target_rev} history (the serie filter"
+            " drops the older series)."
+        )
+        # the ROOT commit of the target branch: walking from the tip
+        # would yield an empty range
+        roots = repo.git.rev_list(
+            "--max-parents=0", end_commit.hexsha
+        ).split()
+        start_commit = (
+            repo.commit(roots[-1]) if roots else end_commit
+        )
+    start_rev = start_commit.hexsha
+    end_rev = end_commit.hexsha
+
+    print(
+        f"Analysing {addon} ({from_serie}.0 -> {to_serie}.0:"
+        f" {start_rev[:10]}..{end_rev[:10]})"
+    )
+    context = build_milestone_context(
+        addon, addon_path, repo, start_rev, end_rev, target_serie=to_serie
+    )
+
+    # No MIGRATION COMMITS DIFF section: the tree diff below already
+    # contains the whole models/wizards delta between the serie tips
+    # (including everything the [MIG] commits did), so a per-[MIG]
+    # commit diff would just bloat the context redundantly.
+
+    # The tree diff of the model/wizard code between the two serie tips
+    # is the ground truth of the migration (commits only show intent;
+    # backported changes cancel out in a tree diff).
+    before_files = (
+        ref_py_files(repo, f"origin/{prev_rev}", addon) if prev_commit else None
+    )
+    after_files = ref_py_files(repo, f"origin/{target_rev}", addon)
+    after_label = f"origin/{target_rev}"
+    if after_files is None and (addon_path / "__manifest__.py").is_file():
+        # not in the target serie branch, but present on disk: only a
+        # migration IN PROGRESS of THIS serie makes the working tree the
+        # right AFTER state (otherwise the local checkout belongs to
+        # another serie and diffing against it would be misleading)
+        wt_serie = _disk_manifest_serie(addon_path)
+        if wt_serie == to_serie:
+            from odoo_module_diff.external_treediff import disk_py_files
+
+            after_files = disk_py_files(addon_path)
+            after_label = f"working tree ({addon_path})"
+            context += (
+                f"\n\nNOTE! {addon} does not exist at origin/{target_rev}:"
+                " it is NOT migrated upstream yet; the tree diff below"
+                " uses the local working tree (migration in progress).\n"
+            )
+        else:
+            context += (
+                f"\n\nNOTE! {addon} is not migrated to {to_serie}.0 yet"
+                f" (the local checkout is {wt_serie}.0): no tree diff"
+                " for this serie step.\n"
+            )
+            after_files = None
+    if before_files is not None and after_files is not None:
+        tree_patch = build_tree_diff(
+            addon,
+            before_files,
+            after_files,
+            f"origin/{prev_rev}",
+            after_label,
+        )
+        if tree_patch:
+            context += (
+                "\n\n"
+                + _SEPARATOR
+                + "\n## TREE DIFF (field definitions + _inherit changes)\n"
+                + _SEPARATOR
+                + "\n\nGround truth between the two serie tips (backported\n"
+                "changes cancel out). Only the hunks with field\n"
+                "definitions, _inherit/_inherits changes or model class\n"
+                "anchors are kept; method changes are in the signatures\n"
+                "delta below.\n\n```diff\n"
+                + tree_patch
+                + "```\n"
+            )
+        elif any(
+            before_files.get(path) != after_files.get(path)
+            for path in set(before_files) | set(after_files)
+        ):
+            context += (
+                "\n\n"
+                + _SEPARATOR
+                + "\n## TREE DIFF (field definitions + _inherit changes)\n"
+                + _SEPARATOR
+                + "\n\nNO structural diff between the two serie tips: no\n"
+                "field definition, _inherit/_inherits or model class\n"
+                "changed — the model layer only saw method-level changes\n"
+                "(see the signatures delta below).\n"
+            )
+        diff_data, added, removed, changed = diff_method_models(
+            extract_methods_from_blobs(before_files),
+            extract_methods_from_blobs(after_files),
+        )
+        if diff_data:
+            context += (
+                "\n\n"
+                + _SEPARATOR
+                + "\n## METHOD SIGNATURES DELTA\n"
+                + _SEPARATOR
+                + "\n\n```\n"
+                + method_signatures_text(
+                    addon, diff_data, (added, removed, changed)
+                )
+                + "```\n"
+            )
+    return context
 
 
 def dump_external_context(
@@ -383,10 +673,70 @@ def dump_external_context(
     target_serie: int = 0,
     output_file: str = "",
     stdout: bool = False,
-) -> None:
-    """CLI entry point: locate the external addon, detect the serie
-    branches around the target serie and dump the milestone context."""
-    from odoo_module_diff.external_locate import locate_external_addon
+    from_serie: int = 0,
+    with_dependencies: bool = False,
+) -> Optional[str]:
+    """CLI entry point: locate the external addon and dump the
+    migration context — one section per serie step between from_serie
+    and target_serie (default: a single step, target_serie - 1 ->
+    target_serie). With --with-dependencies, one file per addon of the
+    transitive dependency closure (dependencies first, core addons skipped)
+    in a `<output>_deps/` directory, so no single file bloats and an agent
+    can load them one by one in migration order."""
+    from odoo_module_diff.classify import is_core_addon
+    from odoo_module_diff.dependencies import resolve_dependencies
+    from odoo_module_diff.external_locate import (
+        build_addons_paths,
+        locate_external_addon,
+    )
+    from odoo_module_diff.main import analysis_home
+
+    analysis_dir = Path(analysis_home())
+
+    def _dump_one(dep: str, out: str) -> None:
+        core, _kind = is_core_addon(dep, serie)
+        if core:
+            # core addon: its diff lives in the shared analysis cache
+            # (ODOO_MODULE_DIFF_HOME); mention it once instead of
+            # dumping anything
+            cache_dir = analysis_dir / f"{serie}.0" / dep
+            if cache_dir.is_dir() and any(cache_dir.glob("*.patch")):
+                print(f"NOTE! Core addon {dep}: diff context in {cache_dir}")
+            else:
+                print(
+                    f"NOTE! Core addon {dep}: no analysis in"
+                    f" {analysis_dir / f'{serie}.0'} — assuming no"
+                    " significant change (run the core scan to build it)."
+                )
+            return
+        found_dep = locate_external_addon(dep, odoo_cfg, addons_path_str)
+        if not found_dep:
+            print(
+                f"WARNING! Dependency {dep} not found in the addons paths"
+                " (nor in the Odoo core): skipped."
+            )
+            return
+        dep_addon_path, dep_repo_path = found_dep
+        dep_repo = git.Repo(str(dep_repo_path))
+        steps = []
+        for step_to in range(from_serie + 1, serie + 1):
+            step = _serie_step_context(
+                dep, dep_addon_path, dep_repo, step_to - 1, step_to
+            )
+            if step:
+                steps.append(step)
+        if not steps:
+            print(f"WARNING! No serie step analysable for {dep}: skipped.")
+            return
+        header = (
+            f"# {dep} migration context ({from_serie}.0 -> {serie}.0,"
+            f" {serie - from_serie} step(s))\n"
+        )
+        dep_context = header + "\n\n" + (
+            "\n\n" + _SEPARATOR + "\n\n"
+        ).join(steps)
+        Path(out).write_text(dep_context)
+        print(f"Migration context written to {out} ({len(dep_context)} chars)")
 
     found = locate_external_addon(addon, odoo_cfg, addons_path_str)
     if not found:
@@ -398,8 +748,6 @@ def dump_external_context(
     addon_path, repo_path = found
     repo = git.Repo(str(repo_path))
 
-    # scan boundary: the target serie branch tip vs the previous serie
-    # branch (merge base, or previous serie tip on recreated branches)
     serie = target_serie
     if not serie:
         # infer the serie from the addon version on the current branch
@@ -412,47 +760,67 @@ def dump_external_context(
             " positionally."
         )
         raise SystemExit(1)
-    target_rev = f"{serie}.0"
-    prev_rev = f"{serie - 1}.0"
-    try:
-        end_commit = repo.commit(target_rev)
-    except git.BadName:
-        print(
-            f"Error! Branch {target_rev} not found in {repo_path}: fetch"
-            f" it first (git -C {repo_path} fetch origin {target_rev})."
-        )
-        raise SystemExit(1) from None
-    try:
-        prev_commit = repo.commit(prev_rev)
-    except git.BadName:
-        prev_commit = None
-    if prev_commit:
-        merge_base = repo.merge_base(prev_commit, end_commit)
-        # on recreated branches there is no merge base: fall back to the
-        # previous serie tip; the serie filter in milestone_commits drops
-        # the older-series history it carries
-        start_commit = merge_base[0] if merge_base else prev_commit
-    else:
-        print(
-            f"WARNING! Branch {prev_rev} not fetched in {repo_path}:"
-            f" analysing the {target_rev} branch history (serie filter"
-            " will drop the older series)."
-        )
-        start_commit = next(repo.iter_commits(target_rev), end_commit)
-    start_rev = start_commit.hexsha
-    end_rev = end_commit.hexsha
+    if not from_serie:
+        from_serie = serie - 1
 
-    print(
-        f"Analysing {addon} in {addon_path}"
-        f" ({start_rev[:10]}..{end_rev[:10]})"
-    )
-    context = build_milestone_context(
-        addon, addon_path, repo, start_rev, end_rev, target_serie=serie
-    )
-    if stdout:
-        print(context)
+    out_path = Path(output_file).expanduser() if output_file else None
+
+    # dependency closure (resolved from the target serie environment,
+    # where the migrated versions live): one file per addon. Core
+    # addons of the closure are intentionally skipped: their diff
+    # context comes from the shared analysis cache (plain core
+    # --dump-context mode).
+    if with_dependencies:
+        addons_paths = build_addons_paths(odoo_cfg, addons_path_str)
+        closure = resolve_dependencies(
+            serie, [str(p) for p in addons_paths], addon
+        )
+        if out_path:
+            out_dir = out_path.with_suffix("").parent / (
+                out_path.stem + "_deps"
+            )
+        else:
+            out_dir = Path.cwd()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Dependency closure (migration order): {', '.join(closure)}")
+        for dep in closure:  # topological: dependencies first
+            _dump_one(dep, str(out_dir / f"{dep}_migration_context.md"))
+        # the target module itself, last (its dependencies' contexts are
+        # already dumped above)
+        if not stdout:
+            _dump_one(addon, str(out_dir / f"{addon}_migration_context.md"))
+        written = sorted(p.name for p in out_dir.glob("*_migration_context.md"))
+        print(
+            f"{len(written)} context file(s) in {out_dir} — load them in"
+            f" migration order (dependencies first, {addon} last); the"
+            " aggregated single file is not written in this mode."
+        )
         return
+
+    steps = []
+    for step_to in range(from_serie + 1, serie + 1):
+        step = _serie_step_context(
+            addon, addon_path, repo, step_to - 1, step_to
+        )
+        if step:
+            steps.append(step)
+    if not steps:
+        steps = [
+            f"# {addon} migration context ({from_serie}.0 -> {serie}.0)\n\n"
+            "No serie step could be analysed: fetch the serie branches in"
+            f" the addon repo ({repo.working_tree_dir or repo.git_dir})."
+        ]
+    header = (
+        f"# {addon} migration context ({from_serie}.0 -> {serie}.0,"
+        f" {serie - from_serie} step(s))\n"
+    )
+    context = header + "\n\n" + ("\n\n" + _SEPARATOR + "\n\n").join(steps)
+    if stdout:
+        # the caller emits the payload: keeping it out of the progress
+        # logs lets `--stdout > file` produce a clean document
+        return context
     if not output_file:
         output_file = f"{addon}_migration_context_{serie}.0.md"
     Path(output_file).write_text(context)
     print(f"Migration context written to {output_file} ({len(context)} chars)")
+    return None

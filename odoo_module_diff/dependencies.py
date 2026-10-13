@@ -11,6 +11,8 @@ from typing import List
 
 import git
 
+from odoo_module_diff.external_locate import odoo_parent_home
+
 # manifestoo only knows released series (last supported one):
 MAX_MANIFESTOO_SERIE = 19
 
@@ -40,9 +42,7 @@ def find_addons_paths(target_serie: int, fs_dir: str = "") -> List[str]:
     external-src repo holding at least one addon (Akretion layout:
     $ODOO_PARENT_HOME/odoo<serie>/odoo/{src/addons,external-src})."""
     if not fs_dir:
-        parent_home = Path(
-            os.environ.get("ODOO_PARENT_HOME", str(Path.home() / "DEV"))
-        ).expanduser()
+        parent_home = odoo_parent_home()
         fs_dir = str(parent_home / f"odoo{target_serie}" / "odoo" / "src")
     env_dir = Path(fs_dir)
     if not (env_dir / "addons").is_dir():
